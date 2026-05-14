@@ -1,6 +1,9 @@
 [Unit]
 Description=NVIDIA MIG Instance Setup
-After=nvidia-persistenced.service local-fs.target
+# systemd-sysext.service merges the stock nvidia.raw at boot, which is what
+# provides /usr/bin/nvidia-smi. Without this After=, our ConditionPathExists
+# below is evaluated before the merge and the unit is silently skipped.
+After=systemd-sysext.service nvidia-persistenced.service local-fs.target
 Before=docker.service
 ConditionPathExists=/usr/bin/nvidia-smi
 
