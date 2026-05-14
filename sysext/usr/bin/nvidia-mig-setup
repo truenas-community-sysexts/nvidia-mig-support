@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Recreates MIG instances on boot from persistent config.
-# Baked into nvidia.raw sysext; runs as a systemd oneshot before docker.service.
+# Baked into nvidia-mig.raw sysext (or nvidia.raw in full-driver builds);
+# runs as a systemd oneshot before docker.service.
 #
 # Config file: /mnt/<pool>/.config/nvidia-gpu/mig.conf
 # Never exits non-zero — must not block boot.
