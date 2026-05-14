@@ -66,3 +66,31 @@ jobs:
           gh release upload "${{ github.event.release.tag_name }}" \
             dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
             --clobber
+
+      - name: Publish/refresh dev prerelease (push to refactor branch)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/refactor/dual-sysext'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="dev-mig-sysext"
+          NOTES="Rolling dev build of the lightweight nvidia-mig sysext from the refactor/dual-sysext branch. Updated on every push. Do not depend on this tag for production — it is force-moved.
+
+          Latest commit: ${{ github.sha }}
+          Built: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
+              --clobber
+            gh release edit "$TAG" \
+              --notes "$NOTES" \
+              --prerelease \
+              --target "${{ github.sha }}"
+          else
+            gh release create "$TAG" \
+              dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
+              --title "Dev: MIG sysext (rolling)" \
+              --notes "$NOTES" \
+              --prerelease \
+              --target "${{ github.sha }}"
+          fi
