@@ -17,15 +17,20 @@
 set -euo pipefail
 
 DEFAULT_RELEASE_URL="https://github.com/scyto/truenas-nvidia-rtx6000-pro-mig/releases/download/dev-mig-sysext/nvidia-mig.raw"
+STOCK_NVIDIA="/usr/share/truenas/sysext-extensions/nvidia.raw"
+MIN_DRIVER_MAJOR=570
+
 SYSEXT_SRC=""
 POOL_NAME=""
 PERSIST_PATH=""
+FORCE=false
 
 for arg in "$@"; do
     case "$arg" in
         --sysext=*) SYSEXT_SRC="${arg#*=}" ;;
         --pool=*) POOL_NAME="${arg#*=}" ;;
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
+        --force) FORCE=true ;;
         -h|--help)
             sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
@@ -37,6 +42,37 @@ done
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: must run as root" >&2
     exit 1
+fi
+
+# --- Pre-flight: detect stock nvidia driver version inside the sysext on disk ---
+# Doesn't require the driver to be loaded; reads the version directly from
+# filenames inside /usr/share/truenas/sysext-extensions/nvidia.raw.
+command -v unsquashfs >/dev/null 2>&1 || { echo "ERROR: unsquashfs not found (squashfs-tools)" >&2; exit 1; }
+
+if [ ! -f "$STOCK_NVIDIA" ]; then
+    echo "ERROR: $STOCK_NVIDIA not found — TrueNAS doesn't appear to have an NVIDIA sysext." >&2
+    echo "       The lightweight nvidia-mig sysext depends on the stock driver being present." >&2
+    exit 1
+fi
+
+DRIVER_VER=$(unsquashfs -l "$STOCK_NVIDIA" 2>/dev/null \
+    | grep -oE 'libnvidia-ml\.so\.[0-9]+\.[0-9]+\.[0-9]+' \
+    | head -1 \
+    | sed 's/^libnvidia-ml\.so\.//' || true)
+
+if [ -z "$DRIVER_VER" ]; then
+    echo "WARN: could not detect driver version inside $STOCK_NVIDIA — proceeding (no support gate)."
+else
+    DRIVER_MAJOR=${DRIVER_VER%%.*}
+    echo "Stock NVIDIA driver in $STOCK_NVIDIA: $DRIVER_VER"
+    if [ "$DRIVER_MAJOR" -lt "$MIN_DRIVER_MAJOR" ]; then
+        echo "" >&2
+        echo "ERROR: stock driver $DRIVER_VER is below the minimum-validated $MIN_DRIVER_MAJOR.x." >&2
+        echo "       MIG support has only been validated on $MIN_DRIVER_MAJOR.x and above on Blackwell GPUs." >&2
+        echo "       Re-run with --force to bypass this check at your own risk." >&2
+        $FORCE || exit 1
+        echo "       --force given, continuing anyway." >&2
+    fi
 fi
 
 # If no source given, fetch the latest dev build from the release.
