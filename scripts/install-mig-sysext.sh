@@ -4,14 +4,19 @@
 # profiles, register a PREINIT script, or touch app assignments. Use the
 # full install.sh for that (Phase 3, not yet rewritten).
 #
+# Default: downloads the latest dev build from the dev-mig-sysext release.
+# Override with --sysext=PATH for a local file.
+#
 # Usage:
-#   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw [--pool=fast]
-#   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw [--persist-path=/mnt/fast/.config/nvidia-gpu]
+#   sudo ./install-mig-sysext.sh
+#   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw
+#   sudo ./install-mig-sysext.sh --pool=fast
 #
 # Assumes the stock TrueNAS nvidia.raw is already merged (provides drivers).
 
 set -euo pipefail
 
+DEFAULT_RELEASE_URL="https://github.com/scyto/truenas-nvidia-rtx6000-pro-mig/releases/download/dev-mig-sysext/nvidia-mig.raw"
 SYSEXT_SRC=""
 POOL_NAME=""
 PERSIST_PATH=""
@@ -22,7 +27,7 @@ for arg in "$@"; do
         --pool=*) POOL_NAME="${arg#*=}" ;;
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         -h|--help)
-            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
@@ -34,8 +39,16 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-if [ -z "$SYSEXT_SRC" ] || [ ! -f "$SYSEXT_SRC" ]; then
-    echo "ERROR: --sysext=PATH is required and must exist" >&2
+# If no source given, fetch the latest dev build from the release.
+if [ -z "$SYSEXT_SRC" ]; then
+    SYSEXT_SRC=$(mktemp -t nvidia-mig.raw.XXXXXX)
+    trap 'rm -f "$SYSEXT_SRC"' EXIT
+    echo "Downloading ${DEFAULT_RELEASE_URL}"
+    curl -fL --retry 3 -o "$SYSEXT_SRC" "$DEFAULT_RELEASE_URL"
+fi
+
+if [ ! -f "$SYSEXT_SRC" ]; then
+    echo "ERROR: sysext source $SYSEXT_SRC does not exist" >&2
     exit 1
 fi
 
