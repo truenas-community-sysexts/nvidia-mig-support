@@ -130,6 +130,15 @@ systemd-sysext unmerge
 systemd-sysext merge
 systemctl daemon-reload
 
+# --- Enable the service for auto-start at boot ---
+# A WantedBy symlink shipped inside the sysext (under /usr/lib/systemd/system/
+# multi-user.target.wants/) does NOT reliably get registered into the boot
+# target — by the time systemd-sysext merges at boot, multi-user.target's
+# dependencies have already been computed. The reliable activation lives in
+# /etc/systemd/system/multi-user.target.wants/ and is created by `enable`.
+echo "Enabling nvidia-mig-setup.service..."
+systemctl enable nvidia-mig-setup.service
+
 # --- Verify ---
 echo ""
 echo "=== Verification ==="

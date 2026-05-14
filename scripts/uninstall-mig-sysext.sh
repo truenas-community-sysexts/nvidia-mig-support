@@ -23,6 +23,12 @@ fi
 
 echo "=== Uninstall nvidia-mig sysext ==="
 
+# --- Disable before removal so /etc symlink doesn't dangle ---
+if systemctl is-enabled nvidia-mig-setup.service >/dev/null 2>&1; then
+    systemctl disable nvidia-mig-setup.service
+    echo "Disabled nvidia-mig-setup.service"
+fi
+
 if [ -L /etc/extensions/nvidia-mig.raw ] || [ -e /etc/extensions/nvidia-mig.raw ]; then
     rm -f /etc/extensions/nvidia-mig.raw
     echo "Removed /etc/extensions/nvidia-mig.raw"
