@@ -1,11 +1,11 @@
 [Unit]
 Description=NVIDIA MIG Instance Setup
-# systemd-sysext.service merges the stock nvidia.raw at boot, which is what
-# provides /usr/bin/nvidia-smi. Without this After=, our ConditionPathExists
-# below is evaluated before the merge and the unit is silently skipped.
+# After= here is best-effort; on TrueNAS the actual sysext merge timing may
+# differ. The script itself waits for /usr/bin/nvidia-smi (up to 60s) and
+# exits cleanly with a log line if it never appears. We deliberately do NOT
+# use ConditionPathExists, which would silently skip with no journal output.
 After=systemd-sysext.service nvidia-persistenced.service local-fs.target
 Before=docker.service
-ConditionPathExists=/usr/bin/nvidia-smi
 
 [Service]
 Type=oneshot

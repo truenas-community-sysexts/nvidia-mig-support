@@ -10,6 +10,23 @@ set -uo pipefail
 
 log() { echo "[nvidia-mig-setup] $*"; }
 
+log "Starting nvidia-mig-setup (boot: $(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown))"
+
+# --- Wait for /usr/bin/nvidia-smi to be available ---
+# The stock NVIDIA sysext may be merged asynchronously by middleware/sysext
+# after this service is queued. Don't rely on a [Unit] ConditionPathExists —
+# that skips silently with no journal output, which makes debugging hard.
+for i in $(seq 1 30); do
+    [ -x /usr/bin/nvidia-smi ] && break
+    [ "$i" -eq 1 ] && log "Waiting for /usr/bin/nvidia-smi (stock NVIDIA sysext may still be merging)..."
+    sleep 2
+done
+
+if [ ! -x /usr/bin/nvidia-smi ]; then
+    log "/usr/bin/nvidia-smi not available after 60s, skipping MIG setup"
+    exit 0
+fi
+
 # --- Find config via glob (handles any pool name) ---
 CONFIG=""
 for f in /mnt/*/.config/nvidia-gpu/mig.conf; do
