@@ -109,9 +109,13 @@ STOCK_SIZE=$(stat -c '%s' "$STOCK")
 echo "SHA256: $STOCK_SHA"
 echo "Size:   $STOCK_SIZE bytes"
 
-# Quick sanity check: stock should be smaller than the current 503MB custom build
-if [ "$STOCK_SIZE" -gt 400000000 ]; then
-    echo "WARN: extracted nvidia.raw is unexpectedly large; verify before installing"
+# Sanity bounds — observed: TrueNAS 25.10.x stock nvidia.raw is ~400 MB
+# (570.172.08 driver + libs + nvidia-container-toolkit). Warn outside a
+# generous range that catches truncated downloads or wildly different content.
+if [ "$STOCK_SIZE" -lt 100000000 ]; then
+    echo "WARN: extracted nvidia.raw is suspiciously small (${STOCK_SIZE} bytes); verify before installing"
+elif [ "$STOCK_SIZE" -gt 700000000 ]; then
+    echo "WARN: extracted nvidia.raw is unexpectedly large (${STOCK_SIZE} bytes); verify before installing"
 fi
 
 # --- 4. Stage as nvidia-original.raw for restore.sh to find next time ---
