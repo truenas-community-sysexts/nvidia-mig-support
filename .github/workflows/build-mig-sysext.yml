@@ -13,6 +13,7 @@ on:
     paths:
       - 'sysext/**'
       - 'scripts/build-mig-sysext.sh'
+      - 'scripts/configure-mig.sh'
       - '.github/workflows/build-mig-sysext.yml'
   release:
     types: [published]
