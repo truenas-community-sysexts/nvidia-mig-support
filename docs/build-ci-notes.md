@@ -40,6 +40,25 @@ The other two are deferred:
 - The **NVIDIA `.run` cache** is held back because the build script `rm -rf`'s its build dir at start (line ~157), so a cache restore would be wiped before the existence check at line ~271 ever runs. Caching this cleanly needs a small script change — a `--nvidia-run-file=` flag mirroring `--update-file=`. Worth it as a follow-up; not in Phase 2's scope.
 - The **kernel-headers cache** is held back because the extraction is fast relative to the `.update` download and adds non-trivial step complexity (needs a `.real-kver` marker file to detect layout changes between TrueNAS minor versions).
 
+## Release tagging scheme
+
+Two tag classes, two roles:
+
+| Class | Format | When | Mutability |
+| --- | --- | --- | --- |
+| **Rolling dev** | `dev-nvidia-sysext` / `dev-mig-sysext` | Push to `main` (auto) | Force-moved on every push |
+| **Immutable production** | `v<truenas>-nvidia<driver>-r<run>` / `v<truenas>-mig-r<run>` | `workflow_dispatch` (manual) | Append-only; `-r<run>` guarantees uniqueness even on same-commit re-dispatch |
+
+The `-r<run>` suffix is `github.run_number` — monotonic per workflow, unique across retries on the same commit. It exists to side-step GitHub's immutable-release tag-burn: if a release is deleted and recreated with the same tag, GitHub keeps the original tag in some surfaces, so a new run that wants its own clean tag needs a different name. Run number is the cheapest unique-per-attempt value available.
+
+Both classes are currently marked `--prerelease` on GitHub. Phase 4 of the refactor will introduce a `mark_latest` workflow input that — after hardware verification — promotes an immutable tag to "Latest". Until that lands, no release is marked Latest, which is why the install scripts still need the dev-* fallback (see [`scripts/install-nvidia-sysext.sh`](../scripts/install-nvidia-sysext.sh)'s `resolve_release_url`).
+
+Tag schema choices worth noting:
+
+- **MIG tag includes TrueNAS version** even though `nvidia-mig.raw` content is TrueNAS-version-independent. The version is consumer context — it tells the user which TrueNAS release this MIG build pairs with.
+- **No commit SHA in the tag.** Tags would get ugly (`v25.10.3.1-mig-abc1234-r12345`) and run_number is already unique. The commit SHA is recorded in the release notes for traceability.
+- **`release_tag` workflow input was dropped.** Free-text tag entry made it too easy to clobber a prior release with the same name. Auto-compute eliminates the footgun.
+
 ## Why a separate `resolve` job
 
 The build workflow is split into `resolve` (`ubuntu-latest`, lightweight) and `build` (`ubuntu-24.04`, expensive). Three reasons:

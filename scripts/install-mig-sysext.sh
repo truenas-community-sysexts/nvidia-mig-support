@@ -8,16 +8,23 @@
 # MIG devices to apps — run `sudo configure-mig` (bundled in the sysext)
 # for that.
 #
-# Default: downloads the latest dev build from the dev-mig-sysext release.
-# Override with --sysext=PATH for a local file.
+# Default: queries the latest non-prerelease (production) release via the
+# GitHub API and downloads nvidia-mig.raw from it. Falls back to the
+# dev-mig-sysext rolling prerelease if no production release exists yet
+# (transitional — removed once Phase 4's mark_latest gate promotes a release).
+#
+# Override with --release=TAG (specific tag) or --sysext=PATH (local file).
 #
 # Usage:
-#   sudo ./install-mig-sysext.sh
-#   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw
+#   sudo ./install-mig-sysext.sh                              # latest production, fallback dev
+#   sudo ./install-mig-sysext.sh --release=dev-mig-sysext     # pin to rolling dev
+#   sudo ./install-mig-sysext.sh --release=v25.10.3.1-mig-r5
+#   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw # local file
 #   sudo ./install-mig-sysext.sh --pool=fast
 #
 # Flags:
 #   --sysext=PATH         Local nvidia-mig.raw to install (skips download)
+#   --release=TAG         Download from this exact release tag
 #   --pool=NAME           ZFS pool for persistent storage (skips auto-detect)
 #   --persist-path=PATH   Exact directory for persistent storage (overrides --pool)
 #   --force               Bypass the stock-driver-version pre-flight check
@@ -31,11 +38,14 @@
 
 set -euo pipefail
 
-DEFAULT_RELEASE_URL="https://github.com/truenas-community-sysexts/nvidia-mig-support/releases/download/dev-mig-sysext/nvidia-mig.raw"
+REPO="truenas-community-sysexts/nvidia-mig-support"
+ASSET="nvidia-mig.raw"
+FALLBACK_TAG="dev-mig-sysext"
 STOCK_NVIDIA="/usr/share/truenas/sysext-extensions/nvidia.raw"
 MIN_DRIVER_MAJOR=570
 
 SYSEXT_SRC=""
+RELEASE_TAG=""
 POOL_NAME=""
 PERSIST_PATH=""
 FORCE=false
@@ -43,16 +53,45 @@ FORCE=false
 for arg in "$@"; do
     case "$arg" in
         --sysext=*) SYSEXT_SRC="${arg#*=}" ;;
+        --release=*) RELEASE_TAG="${arg#*=}" ;;
         --pool=*) POOL_NAME="${arg#*=}" ;;
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         --force) FORCE=true ;;
         -h|--help)
-            sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
+
+resolve_release_url() {
+    # Returns the release-asset URL on stdout. Strategy:
+    #   1. If --release=TAG was passed, use it as-is.
+    #   2. Else, query /releases/latest for the most recent non-prerelease.
+    #   3. Else, fall back to the rolling dev prerelease.
+    # Step 3 is transitional. Once Phase 4 of the CI refactor introduces the
+    # mark_latest gate and a release is promoted, step 2 will succeed and the
+    # fallback becomes dead code.
+    local tag="$1"
+    if [ -n "$tag" ]; then
+        printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$tag" "$ASSET"
+        return
+    fi
+    local latest_tag
+    latest_tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get("tag_name", ""))
+except Exception:
+    pass' 2>/dev/null || true)
+    if [ -n "$latest_tag" ]; then
+        printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$latest_tag" "$ASSET"
+        return
+    fi
+    printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$FALLBACK_TAG" "$ASSET"
+}
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: must run as root" >&2
@@ -90,12 +129,13 @@ else
     fi
 fi
 
-# If no source given, fetch the latest dev build from the release.
+# If no source given, fetch from the resolved release URL.
 if [ -z "$SYSEXT_SRC" ]; then
     SYSEXT_SRC=$(mktemp -t nvidia-mig.raw.XXXXXX)
     trap 'rm -f "$SYSEXT_SRC"' EXIT
-    echo "Downloading ${DEFAULT_RELEASE_URL}"
-    curl -fL --retry 3 -o "$SYSEXT_SRC" "$DEFAULT_RELEASE_URL"
+    RELEASE_URL=$(resolve_release_url "$RELEASE_TAG")
+    echo "Downloading ${RELEASE_URL}"
+    curl -fL --retry 3 -o "$SYSEXT_SRC" "$RELEASE_URL"
 fi
 
 if [ ! -f "$SYSEXT_SRC" ]; then

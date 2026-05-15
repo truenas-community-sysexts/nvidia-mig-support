@@ -3,8 +3,12 @@ name: Build MIG Sysext
 on:
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: 'Optional: create a GitHub release with this tag (leave empty to just upload an artifact)'
+      truenas_version:
+        description: 'TrueNAS version (leave blank for latest tracked)'
+        required: false
+        default: ''
+      train_name:
+        description: 'TrueNAS train / codename (leave blank for latest tracked)'
         required: false
         default: ''
   push:
@@ -15,17 +19,79 @@ on:
       - 'scripts/build-mig-sysext.sh'
       - 'scripts/configure-mig.sh'
       - '.github/workflows/build-mig-sysext.yml'
-  release:
-    types: [published]
+      - '.github/tracked-versions.json'
 
 permissions:
   contents: write
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      truenas_version: ${{ steps.params.outputs.truenas_version }}
+      train_name: ${{ steps.params.outputs.train_name }}
+      release_tag: ${{ steps.params.outputs.release_tag }}
+      is_prerelease: ${{ steps.params.outputs.is_prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            .github/tracked-versions.json
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve build parameters
+        id: params
+        env:
+          INPUT_TRUENAS_VERSION: ${{ inputs.truenas_version }}
+          INPUT_TRAIN_NAME: ${{ inputs.train_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          TRACKED=$(python3 -c "
+          import json
+          with open('.github/tracked-versions.json') as f:
+              d = json.load(f)
+          print(d['truenas']['version'])
+          print(d['truenas']['train'])
+          ")
+          TRACKED_TRUENAS=$(sed -n '1p' <<< "$TRACKED")
+          TRACKED_TRAIN=$(sed -n '2p' <<< "$TRACKED")
+
+          TRUENAS_VERSION="${INPUT_TRUENAS_VERSION:-$TRACKED_TRUENAS}"
+          TRAIN_NAME="${INPUT_TRAIN_NAME:-$TRACKED_TRAIN}"
+
+          # Tag policy (mirrors build-nvidia-sysext.yml):
+          # - push to main      → dev-mig-sysext (rolling, mutable, prerelease)
+          # - workflow_dispatch → v<truenas>-mig-r<run> (immutable, prerelease until promoted)
+          # MIG sysext content is TrueNAS-version-independent, but the tag includes
+          # TrueNAS for consumer context (which release pairs with which TrueNAS).
+          if [ "$EVENT_NAME" = "push" ]; then
+            RELEASE_TAG="dev-mig-sysext"
+            IS_PRERELEASE="true"
+          else
+            RELEASE_TAG="v${TRUENAS_VERSION}-mig-r${RUN_NUMBER}"
+            IS_PRERELEASE="true"
+          fi
+
+          {
+            echo "truenas_version=${TRUENAS_VERSION}"
+            echo "train_name=${TRAIN_NAME}"
+            echo "release_tag=${RELEASE_TAG}"
+            echo "is_prerelease=${IS_PRERELEASE}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved build parameters:"
+          echo "  TrueNAS:  ${TRUENAS_VERSION} (${TRAIN_NAME})"
+          echo "  Release:  ${RELEASE_TAG} (prerelease=${IS_PRERELEASE})"
+
   build:
+    needs: resolve
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install squashfs-tools
         run: sudo apt-get update && sudo apt-get install -y squashfs-tools
@@ -38,61 +104,40 @@ jobs:
           unsquashfs -l dist/nvidia-mig.raw
           ls -la dist/
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: nvidia-mig-sysext
+          name: nvidia-mig-sysext-${{ needs.resolve.outputs.truenas_version }}
           path: |
             dist/nvidia-mig.raw
             dist/nvidia-mig.raw.sha256
           if-no-files-found: error
           retention-days: 30
 
-      - name: Attach to release (workflow_dispatch with tag)
-        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.release_tag }}
+          IS_PRERELEASE: ${{ needs.resolve.outputs.is_prerelease }}
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
-          gh release create "${{ inputs.release_tag }}" \
-            dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
-            --title "${{ inputs.release_tag }}" \
-            --notes "MIG-only sysext build. Pairs with TrueNAS stock nvidia.raw." \
-            --target "${{ github.sha }}"
+          NOTES="Lightweight MIG sysext. Pairs with TrueNAS stock nvidia.raw (driver >= 570).
 
-      - name: Attach to release (release event)
-        if: github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
-            dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
-            --clobber
+          TrueNAS:       ${TRUENAS_VERSION}
+          Run number:    ${RUN_NUMBER}
+          Source commit: ${COMMIT_SHA}"
 
-      - name: Publish/refresh dev prerelease (push to main)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="dev-mig-sysext"
-          NOTES="Rolling dev build of the lightweight nvidia-mig sysext. Updated on every push to main. Do not depend on this tag for production — it is force-moved.
-
-          Source branch: ${{ github.ref_name }}
-          Latest commit: ${{ github.sha }}
-          Built: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          PRERELEASE_FLAG=""
+          if [ "$IS_PRERELEASE" = "true" ]; then PRERELEASE_FLAG="--prerelease"; fi
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" \
-              dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
-              --clobber
-            gh release edit "$TAG" \
-              --notes "$NOTES" \
-              --prerelease \
-              --target "${{ github.sha }}"
+            gh release upload "$TAG" dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 --clobber
+            # shellcheck disable=SC2086 # PRERELEASE_FLAG is intentionally word-split
+            gh release edit "$TAG" --notes "$NOTES" --target "$COMMIT_SHA" $PRERELEASE_FLAG
           else
-            gh release create "$TAG" \
-              dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
-              --title "Dev: MIG sysext (rolling)" \
-              --notes "$NOTES" \
-              --prerelease \
-              --target "${{ github.sha }}"
+            # shellcheck disable=SC2086 # PRERELEASE_FLAG is intentionally word-split
+            gh release create "$TAG" dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
+              --title "$TAG" --notes "$NOTES" --target "$COMMIT_SHA" $PRERELEASE_FLAG
           fi
