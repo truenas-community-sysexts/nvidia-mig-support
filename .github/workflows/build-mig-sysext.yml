@@ -1,0 +1,99 @@
+name: Build MIG Sysext
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional: create a GitHub release with this tag (leave empty to just upload an artifact)'
+        required: false
+        default: ''
+  push:
+    branches:
+      - main
+      - refactor/dual-sysext
+    paths:
+      - 'sysext/**'
+      - 'scripts/build-mig-sysext.sh'
+      - 'scripts/configure-mig.sh'
+      - '.github/workflows/build-mig-sysext.yml'
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install squashfs-tools
+        run: sudo apt-get update && sudo apt-get install -y squashfs-tools
+
+      - name: Build nvidia-mig.raw
+        run: scripts/build-mig-sysext.sh --out=dist/nvidia-mig.raw
+
+      - name: Inspect contents
+        run: |
+          unsquashfs -l dist/nvidia-mig.raw
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvidia-mig-sysext
+          path: |
+            dist/nvidia-mig.raw
+            dist/nvidia-mig.raw.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to release (workflow_dispatch with tag)
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.release_tag }}" \
+            dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
+            --title "${{ inputs.release_tag }}" \
+            --notes "MIG-only sysext build. Pairs with TrueNAS stock nvidia.raw." \
+            --target "${{ github.sha }}"
+
+      - name: Attach to release (release event)
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
+            --clobber
+
+      - name: Publish/refresh dev prerelease (push to main or refactor branch)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/refactor/dual-sysext')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="dev-mig-sysext"
+          NOTES="Rolling dev build of the lightweight nvidia-mig sysext. Updated on every push to main (or the refactor branch). Do not depend on this tag for production — it is force-moved.
+
+          Source branch: ${{ github.ref_name }}
+          Latest commit: ${{ github.sha }}
+          Built: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
+              --clobber
+            gh release edit "$TAG" \
+              --notes "$NOTES" \
+              --prerelease \
+              --target "${{ github.sha }}"
+          else
+            gh release create "$TAG" \
+              dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
+              --title "Dev: MIG sysext (rolling)" \
+              --notes "$NOTES" \
+              --prerelease \
+              --target "${{ github.sha }}"
+          fi
