@@ -42,22 +42,27 @@ The other two are deferred:
 
 ## Release tagging scheme
 
-Two tag classes, two roles:
+**Every release is immutable.** No rolling tags. This is forced by the repo-level "Immutable releases" setting — once a release is created, its tag and assets cannot be modified or deleted. A rolling `dev-*` tag pattern was tried in Phase 3 and immediately failed (`Cannot delete asset from an immutable release`); the design now mirrors hailo8-support's, which solved this same problem first.
 
-| Class | Format | When | Mutability |
-| --- | --- | --- | --- |
-| **Rolling dev** | `dev-nvidia-sysext` / `dev-mig-sysext` | Push to `main` (auto) | Force-moved on every push |
-| **Immutable production** | `v<truenas>-nvidia<driver>-r<run>` / `v<truenas>-mig-r<run>` | `workflow_dispatch` (manual) | Append-only; `-r<run>` guarantees uniqueness even on same-commit re-dispatch |
+Tag formats:
 
-The `-r<run>` suffix is `github.run_number` — monotonic per workflow, unique across retries on the same commit. It exists to side-step GitHub's immutable-release tag-burn: if a release is deleted and recreated with the same tag, GitHub keeps the original tag in some surfaces, so a new run that wants its own clean tag needs a different name. Run number is the cheapest unique-per-attempt value available.
+- **`v<truenas>-nvidia<driver>-r<run>`** — produced by `build-nvidia-sysext.yml`
+- **`v<truenas>-mig-r<run>`** — produced by `build-mig-sysext.yml`
 
-Both classes are currently marked `--prerelease` on GitHub. Phase 4 of the refactor will introduce a `mark_latest` workflow input that — after hardware verification — promotes an immutable tag to "Latest". Until that lands, no release is marked Latest, which is why the install scripts still need the dev-* fallback (see [`scripts/install-nvidia-sysext.sh`](../scripts/install-nvidia-sysext.sh)'s `resolve_release_url`).
+The `-r<run>` suffix is `github.run_number` — monotonic per workflow, unique across retries on the same commit. So every workflow invocation gets a fresh, never-before-used tag, and `softprops/action-gh-release` can create the release cleanly without ever needing to delete or update an existing one.
+
+The `make_latest` GitHub flag is what users pin to, not a tag name. Two sources can produce releases:
+
+- **Manual `workflow_dispatch`** — defaults `mark_latest=true`. Promotes the new release to GitHub "Latest" immediately. The intent is: a human ran this, it's intentional, surface it as the new default.
+- **Phase 4 `workflow_call` from `check-releases.yml`** (not yet built) — will pass `mark_latest=false`. Auto-builds get a release but don't displace the existing Latest until a hardware-test issue is resolved.
+
+How the install scripts find the right release: detect local TrueNAS version via `midclt call system.info`, query `/repos/.../releases`, filter by `v<version>-nvidia` (or `-mig-`) prefix, pick the most-recently-published. See `resolve_release_tag()` in [`scripts/install-nvidia-sysext.sh`](../scripts/install-nvidia-sysext.sh).
 
 Tag schema choices worth noting:
 
-- **MIG tag includes TrueNAS version** even though `nvidia-mig.raw` content is TrueNAS-version-independent. The version is consumer context — it tells the user which TrueNAS release this MIG build pairs with.
-- **No commit SHA in the tag.** Tags would get ugly (`v25.10.3.1-mig-abc1234-r12345`) and run_number is already unique. The commit SHA is recorded in the release notes for traceability.
-- **`release_tag` workflow input was dropped.** Free-text tag entry made it too easy to clobber a prior release with the same name. Auto-compute eliminates the footgun.
+- **MIG tag includes TrueNAS version** even though `nvidia-mig.raw` content is TrueNAS-version-independent. The version is consumer context — it tells the user which TrueNAS release this MIG build pairs with, and it's also what the install script's prefix-match needs.
+- **No commit SHA in the tag.** Tags would get ugly (`v25.10.3.1-mig-abc1234-r12345`) and run_number already provides uniqueness. The commit SHA is recorded in the release notes.
+- **No `push: main` trigger on the build workflows.** Push-triggered builds are what produced the `dev-*` tag-burn failure. Builds now only happen on intentional triggers (manual dispatch, future check-releases auto-bumps) — same model as hailo.
 
 ## Why a separate `resolve` job
 

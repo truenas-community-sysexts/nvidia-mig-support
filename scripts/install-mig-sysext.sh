@@ -8,16 +8,16 @@
 # MIG devices to apps — run `sudo configure-mig` (bundled in the sysext)
 # for that.
 #
-# Default: queries the latest non-prerelease (production) release via the
-# GitHub API and downloads nvidia-mig.raw from it. Falls back to the
-# dev-mig-sysext rolling prerelease if no production release exists yet
-# (transitional — removed once Phase 4's mark_latest gate promotes a release).
+# Default: auto-detects the running TrueNAS version, then picks the most
+# recently published release whose tag begins `v<version>-mig-` and
+# downloads nvidia-mig.raw from it. Releases are append-only and tagged
+# with a unique `-r<run_number>` suffix; the install script always pulls
+# the newest matching one.
 #
 # Override with --release=TAG (specific tag) or --sysext=PATH (local file).
 #
 # Usage:
-#   sudo ./install-mig-sysext.sh                              # latest production, fallback dev
-#   sudo ./install-mig-sysext.sh --release=dev-mig-sysext     # pin to rolling dev
+#   sudo ./install-mig-sysext.sh                              # auto-detect
 #   sudo ./install-mig-sysext.sh --release=v25.10.3.1-mig-r5
 #   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw # local file
 #   sudo ./install-mig-sysext.sh --pool=fast
@@ -40,7 +40,7 @@ set -euo pipefail
 
 REPO="truenas-community-sysexts/nvidia-mig-support"
 ASSET="nvidia-mig.raw"
-FALLBACK_TAG="dev-mig-sysext"
+TAG_PREFIX_SUFFIX="-mig-"  # full prefix is v<truenas>-mig-
 STOCK_NVIDIA="/usr/share/truenas/sysext-extensions/nvidia.raw"
 MIN_DRIVER_MAJOR=570
 
@@ -65,32 +65,53 @@ for arg in "$@"; do
     esac
 done
 
-resolve_release_url() {
-    # Returns the release-asset URL on stdout. Strategy:
-    #   1. If --release=TAG was passed, use it as-is.
-    #   2. Else, query /releases/latest for the most recent non-prerelease.
-    #   3. Else, fall back to the rolling dev prerelease.
-    # Step 3 is transitional. Once Phase 4 of the CI refactor introduces the
-    # mark_latest gate and a release is promoted, step 2 will succeed and the
-    # fallback becomes dead code.
-    local tag="$1"
-    if [ -n "$tag" ]; then
-        printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$tag" "$ASSET"
+resolve_release_tag() {
+    # Returns the release tag on stdout.
+    # If --release=TAG was passed, echoes it verbatim.
+    # Otherwise: detect local TrueNAS version, query /releases, filter tags
+    # by `v<version>${TAG_PREFIX_SUFFIX}` prefix, pick newest by published_at.
+    if [ -n "$RELEASE_TAG" ]; then
+        printf '%s\n' "$RELEASE_TAG"
         return
     fi
-    local latest_tag
-    latest_tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
-        | python3 -c 'import json,sys
+
+    local version
+    version=$(midclt call system.info 2>/dev/null | python3 -c '
+import sys, json
 try:
-    d = json.load(sys.stdin)
-    print(d.get("tag_name", ""))
+    print(json.load(sys.stdin)["version"])
 except Exception:
-    pass' 2>/dev/null || true)
-    if [ -n "$latest_tag" ]; then
-        printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$latest_tag" "$ASSET"
-        return
+    pass' 2>/dev/null) || true
+    if [ -z "$version" ]; then
+        echo "ERROR: could not detect TrueNAS version (midclt call system.info failed)" >&2
+        exit 1
     fi
-    printf 'https://github.com/%s/releases/download/%s/%s\n' "$REPO" "$FALLBACK_TAG" "$ASSET"
+    echo "Detected TrueNAS version: ${version}" >&2
+
+    local prefix="v${version}${TAG_PREFIX_SUFFIX}"
+    local tag
+    tag=$(curl -sf --max-time 30 "https://api.github.com/repos/${REPO}/releases" 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    releases = json.load(sys.stdin)
+    prefix = '${prefix}'
+    matches = [r for r in releases if r.get('tag_name', '').startswith(prefix)]
+    matches.sort(key=lambda r: r.get('published_at') or r.get('created_at') or '', reverse=True)
+    if matches:
+        print(matches[0]['tag_name'], end='')
+except Exception:
+    pass") || true
+
+    if [ -z "$tag" ]; then
+        echo "ERROR: no release found with tag prefix '${prefix}'" >&2
+        echo "       Available release tags:" >&2
+        curl -sf --max-time 30 "https://api.github.com/repos/${REPO}/releases" 2>/dev/null \
+            | python3 -c "import sys,json; [print(f'         {r[\"tag_name\"]}') for r in json.load(sys.stdin)]" >&2 || true
+        echo "       If you need a specific build, pass --release=TAG explicitly." >&2
+        exit 1
+    fi
+    printf '%s\n' "$tag"
 }
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -129,11 +150,12 @@ else
     fi
 fi
 
-# If no source given, fetch from the resolved release URL.
+# If no source given, fetch from the resolved release.
 if [ -z "$SYSEXT_SRC" ]; then
     SYSEXT_SRC=$(mktemp -t nvidia-mig.raw.XXXXXX)
     trap 'rm -f "$SYSEXT_SRC"' EXIT
-    RELEASE_URL=$(resolve_release_url "$RELEASE_TAG")
+    RESOLVED_TAG=$(resolve_release_tag)
+    RELEASE_URL="https://github.com/${REPO}/releases/download/${RESOLVED_TAG}/${ASSET}"
     echo "Downloading ${RELEASE_URL}"
     curl -fL --retry 3 -o "$SYSEXT_SRC" "$RELEASE_URL"
 fi
