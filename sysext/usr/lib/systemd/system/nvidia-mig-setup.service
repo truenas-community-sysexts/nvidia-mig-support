@@ -1,16 +1,12 @@
 [Unit]
 Description=NVIDIA MIG Instance Setup
-# After= here is best-effort; on TrueNAS the actual sysext merge timing may
-# differ. The script itself waits for /usr/bin/nvidia-smi (up to 60s) and
-# exits cleanly with a log line if it never appears. We deliberately do NOT
-# use ConditionPathExists, which would silently skip with no journal output.
-After=systemd-sysext.service nvidia-persistenced.service local-fs.target
-Before=docker.service
+# Activated at boot by a TrueNAS PREINIT entry (midclt initshutdownscript),
+# not by WantedBy=multi-user.target — sysext-shipped Install symlinks aren't
+# reliably honored by TrueNAS's boot path. The script itself also waits up
+# to 60s for /usr/bin/nvidia-smi in case the stock sysext hasn't merged yet.
+After=systemd-sysext.service local-fs.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/nvidia-mig-setup
-
-[Install]
-WantedBy=multi-user.target

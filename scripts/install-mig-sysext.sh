@@ -130,14 +130,40 @@ systemd-sysext unmerge
 systemd-sysext merge
 systemctl daemon-reload
 
-# --- Enable the service for auto-start at boot ---
-# A WantedBy symlink shipped inside the sysext (under /usr/lib/systemd/system/
-# multi-user.target.wants/) does NOT reliably get registered into the boot
-# target — by the time systemd-sysext merges at boot, multi-user.target's
-# dependencies have already been computed. The reliable activation lives in
-# /etc/systemd/system/multi-user.target.wants/ and is created by `enable`.
-echo "Enabling nvidia-mig-setup.service..."
-systemctl enable nvidia-mig-setup.service
+# --- Register PREINIT script via midclt for boot-time activation ---
+# WantedBy=multi-user.target doesn't reliably activate sysext-shipped units
+# at boot on TrueNAS (silent skip, no journal entries, as confirmed on
+# hardware). TrueNAS's PREINIT mechanism runs before services like Docker
+# and is the canonical way to trigger GPU setup at boot.
+PREINIT_CMD="/usr/bin/systemctl start nvidia-mig-setup.service"
+PREINIT_COMMENT="Start nvidia-mig-setup (lightweight sysext path)"
+echo "Registering PREINIT command: $PREINIT_CMD"
+
+EXISTING_ID=$(midclt call initshutdownscript.query 2>/dev/null \
+    | python3 -c "
+import sys, json
+try:
+    scripts = json.load(sys.stdin)
+    for s in scripts:
+        cmd = (s.get('command') or '') + ' ' + (s.get('script') or '')
+        if 'nvidia-mig-setup' in cmd:
+            print(s['id'], end='')
+            break
+except Exception:
+    pass
+" 2>/dev/null)
+
+PREINIT_JSON="{\"type\": \"COMMAND\", \"command\": \"${PREINIT_CMD}\", \"when\": \"PREINIT\", \"enabled\": true, \"timeout\": 120, \"comment\": \"${PREINIT_COMMENT}\"}"
+
+if [ -n "$EXISTING_ID" ]; then
+    echo "PREINIT entry already exists (id: ${EXISTING_ID}), updating..."
+    midclt call initshutdownscript.update "$EXISTING_ID" "$PREINIT_JSON" >/dev/null \
+        || echo "WARNING: Failed to update PREINIT entry"
+else
+    midclt call initshutdownscript.create "$PREINIT_JSON" >/dev/null \
+        || echo "WARNING: Failed to register PREINIT entry"
+    echo "PREINIT entry registered"
+fi
 
 # --- Verify ---
 echo ""

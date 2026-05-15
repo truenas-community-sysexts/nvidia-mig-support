@@ -23,10 +23,27 @@ fi
 
 echo "=== Uninstall nvidia-mig sysext ==="
 
-# --- Disable before removal so /etc symlink doesn't dangle ---
-if systemctl is-enabled nvidia-mig-setup.service >/dev/null 2>&1; then
-    systemctl disable nvidia-mig-setup.service
-    echo "Disabled nvidia-mig-setup.service"
+# --- Deregister PREINIT entry ---
+PREINIT_ID=$(midclt call initshutdownscript.query 2>/dev/null \
+    | python3 -c "
+import sys, json
+try:
+    scripts = json.load(sys.stdin)
+    for s in scripts:
+        cmd = (s.get('command') or '') + ' ' + (s.get('script') or '')
+        if 'nvidia-mig-setup' in cmd:
+            print(s['id'], end='')
+            break
+except Exception:
+    pass
+" 2>/dev/null)
+
+if [ -n "$PREINIT_ID" ]; then
+    midclt call initshutdownscript.delete "$PREINIT_ID" >/dev/null 2>&1 \
+        && echo "Deregistered PREINIT entry (id: ${PREINIT_ID})" \
+        || echo "WARNING: Failed to deregister PREINIT entry (id: ${PREINIT_ID})"
+else
+    echo "No nvidia-mig-setup PREINIT entry found to deregister"
 fi
 
 if [ -L /etc/extensions/nvidia-mig.raw ] || [ -e /etc/extensions/nvidia-mig.raw ]; then

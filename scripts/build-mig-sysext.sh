@@ -28,8 +28,7 @@ command -v mksquashfs >/dev/null || { echo "mksquashfs not found (apt install sq
 STAGE="$(mktemp -d -t nvidia-mig-stage.XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT
 
-mkdir -p "${STAGE}/usr/bin" \
-         "${STAGE}/usr/lib/systemd/system/multi-user.target.wants"
+mkdir -p "${STAGE}/usr/bin" "${STAGE}/usr/lib/systemd/system"
 
 cp "${REPO_ROOT}/sysext/usr/bin/nvidia-mig-setup" "${STAGE}/usr/bin/nvidia-mig-setup"
 chmod 0755 "${STAGE}/usr/bin/nvidia-mig-setup"
@@ -38,8 +37,8 @@ cp "${REPO_ROOT}/sysext/usr/lib/systemd/system/nvidia-mig-setup.service" \
    "${STAGE}/usr/lib/systemd/system/nvidia-mig-setup.service"
 chmod 0644 "${STAGE}/usr/lib/systemd/system/nvidia-mig-setup.service"
 
-ln -sf ../nvidia-mig-setup.service \
-    "${STAGE}/usr/lib/systemd/system/multi-user.target.wants/nvidia-mig-setup.service"
+# No multi-user.target.wants symlink — boot activation is via a TrueNAS
+# PREINIT entry registered by install-mig-sysext.sh, not via WantedBy.
 
 if [ -n "$DMS_PATH" ]; then
     [ -f "$DMS_PATH" ] || { echo "displaymodeselector not found: $DMS_PATH" >&2; exit 1; }
