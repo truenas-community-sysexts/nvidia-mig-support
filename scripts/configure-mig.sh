@@ -383,8 +383,6 @@ echo ""
 # --- Enumerate created MIG instances ---
 mapfile -t MIG_UUIDS < <(/usr/bin/nvidia-smi -L 2>/dev/null \
     | grep 'MIG' | sed -n 's/.*UUID: \(MIG-[^)]*\)).*/\1/p')
-mapfile -t MIG_NAMES < <(/usr/bin/nvidia-smi -L 2>/dev/null \
-    | grep 'MIG' | sed 's/.*MIG /MIG /' | sed 's/[[:space:]]*Device.*//')
 
 if [ "${#MIG_UUIDS[@]}" -eq 0 ]; then
     echo "ERROR: no MIG UUIDs found after instance creation. Check journalctl -u nvidia-mig-setup." >&2
