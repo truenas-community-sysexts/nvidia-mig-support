@@ -6,7 +6,7 @@ on:
       nvidia_version:
         description: 'NVIDIA driver version (e.g. 570.172.08, 580.126.18, 590.44.01)'
         required: true
-        default: '570.172.08'
+        default: '580.126.18'
       truenas_version:
         description: 'TrueNAS version (e.g. 25.10.3.1)'
         required: true
@@ -30,9 +30,28 @@ on:
         description: 'Optional: create a GitHub release with this tag (leave empty for artifact only)'
         required: false
         default: ''
+  push:
+    branches:
+      - refactor/dual-sysext
+      - main
+    paths:
+      - 'scripts/build-nvidia-sysext.sh'
+      - 'scripts/configure-mig.sh'
+      - 'sysext/**'
+      - '.github/workflows/build-nvidia-sysext.yml'
 
 permissions:
   contents: write
+
+# Defaults used by push-triggered builds (no inputs available there).
+# The same values are also the workflow_dispatch defaults above, so the
+# two paths produce identical artifacts for the "rolling dev" case.
+env:
+  DEFAULT_NVIDIA_VERSION: '580.126.18'
+  DEFAULT_TRUENAS_VERSION: '25.10.3.1'
+  DEFAULT_KERNEL_MODULE_TYPE: 'open'
+  DEFAULT_BUNDLE_MIG: 'true'
+  DEFAULT_DEV_RELEASE_TAG: 'dev-nvidia-sysext'
 
 jobs:
   build:
@@ -40,6 +59,41 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve build parameters
+        id: params
+        run: |
+          NVIDIA_VERSION='${{ inputs.nvidia_version }}'
+          TRUENAS_VERSION='${{ inputs.truenas_version }}'
+          KERNEL_MODULE_TYPE='${{ inputs.kernel_module_type }}'
+          TRUENAS_CODENAME='${{ inputs.truenas_codename }}'
+          BUNDLE_MIG='${{ inputs.bundle_mig }}'
+          RELEASE_TAG='${{ inputs.release_tag }}'
+
+          # On push, inputs.* are empty — fall back to defaults and
+          # publish to the rolling dev prerelease automatically.
+          if [ -z "$NVIDIA_VERSION" ];      then NVIDIA_VERSION="$DEFAULT_NVIDIA_VERSION"; fi
+          if [ -z "$TRUENAS_VERSION" ];     then TRUENAS_VERSION="$DEFAULT_TRUENAS_VERSION"; fi
+          if [ -z "$KERNEL_MODULE_TYPE" ];  then KERNEL_MODULE_TYPE="$DEFAULT_KERNEL_MODULE_TYPE"; fi
+          if [ -z "$BUNDLE_MIG" ];          then BUNDLE_MIG="$DEFAULT_BUNDLE_MIG"; fi
+          if [ -z "$RELEASE_TAG" ] && [ "${{ github.event_name }}" = "push" ]; then
+            RELEASE_TAG="$DEFAULT_DEV_RELEASE_TAG"
+          fi
+
+          {
+            echo "nvidia_version=$NVIDIA_VERSION"
+            echo "truenas_version=$TRUENAS_VERSION"
+            echo "kernel_module_type=$KERNEL_MODULE_TYPE"
+            echo "truenas_codename=$TRUENAS_CODENAME"
+            echo "bundle_mig=$BUNDLE_MIG"
+            echo "release_tag=$RELEASE_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved build parameters:"
+          echo "  NVIDIA:    $NVIDIA_VERSION ($KERNEL_MODULE_TYPE)"
+          echo "  TrueNAS:   $TRUENAS_VERSION ${TRUENAS_CODENAME:+($TRUENAS_CODENAME)}"
+          echo "  Bundle MIG: $BUNDLE_MIG"
+          echo "  Release:   ${RELEASE_TAG:-<none>}"
 
       - name: Show runner capacity
         run: |
@@ -58,10 +112,11 @@ jobs:
 
       - name: Build nvidia.raw
         env:
-          NVIDIA_VERSION: ${{ inputs.nvidia_version }}
-          TRUENAS_VERSION: ${{ inputs.truenas_version }}
-          NVIDIA_KERNEL_MODULE_TYPE: ${{ inputs.kernel_module_type }}
-          TRUENAS_CODENAME: ${{ inputs.truenas_codename }}
+          NVIDIA_VERSION: ${{ steps.params.outputs.nvidia_version }}
+          TRUENAS_VERSION: ${{ steps.params.outputs.truenas_version }}
+          NVIDIA_KERNEL_MODULE_TYPE: ${{ steps.params.outputs.kernel_module_type }}
+          TRUENAS_CODENAME: ${{ steps.params.outputs.truenas_codename }}
+          BUNDLE_MIG: ${{ steps.params.outputs.bundle_mig }}
         run: |
           ARGS=(
             --nvidia-version="$NVIDIA_VERSION"
@@ -70,7 +125,7 @@ jobs:
             --out=dist
           )
           [ -n "$TRUENAS_CODENAME" ] && ARGS+=(--truenas-codename="$TRUENAS_CODENAME")
-          if [ "${{ inputs.bundle_mig }}" = "false" ]; then ARGS+=(--no-mig-bundle); fi
+          if [ "$BUNDLE_MIG" = "false" ]; then ARGS+=(--no-mig-bundle); fi
           sudo -E scripts/build-nvidia-sysext.sh "${ARGS[@]}"
 
       - name: Inspect output
@@ -82,7 +137,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nvidia-sysext-${{ inputs.nvidia_version }}-truenas-${{ inputs.truenas_version }}
+          name: nvidia-sysext-${{ steps.params.outputs.nvidia_version }}-truenas-${{ steps.params.outputs.truenas_version }}
           path: |
             dist/nvidia.raw
             dist/nvidia.raw.sha256
@@ -90,20 +145,26 @@ jobs:
           retention-days: 30
 
       - name: Attach to release
-        if: inputs.release_tag != ''
+        if: steps.params.outputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.params.outputs.release_tag }}
+          NVIDIA_VERSION: ${{ steps.params.outputs.nvidia_version }}
+          KERNEL_MODULE_TYPE: ${{ steps.params.outputs.kernel_module_type }}
+          TRUENAS_VERSION: ${{ steps.params.outputs.truenas_version }}
+          BUNDLE_MIG: ${{ steps.params.outputs.bundle_mig }}
         run: |
-          TAG='${{ inputs.release_tag }}'
           NOTES="Full-driver nvidia.raw sysext.
-          Driver:  ${{ inputs.nvidia_version }} (${{ inputs.kernel_module_type }})
-          TrueNAS: ${{ inputs.truenas_version }}
-          MIG bundled: ${{ inputs.bundle_mig }}
+          Driver:  ${NVIDIA_VERSION} (${KERNEL_MODULE_TYPE})
+          TrueNAS: ${TRUENAS_VERSION}
+          MIG bundled: ${BUNDLE_MIG}
           Built from commit: ${{ github.sha }}"
+          PRERELEASE_FLAG=""
+          if [[ "$TAG" == dev-* ]]; then PRERELEASE_FLAG="--prerelease"; fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/nvidia.raw dist/nvidia.raw.sha256 --clobber
-            gh release edit "$TAG" --notes "$NOTES" --target "${{ github.sha }}"
+            gh release edit "$TAG" --notes "$NOTES" --target "${{ github.sha }}" $PRERELEASE_FLAG
           else
             gh release create "$TAG" dist/nvidia.raw dist/nvidia.raw.sha256 \
-              --title "$TAG" --notes "$NOTES" --target "${{ github.sha }}"
+              --title "$TAG" --notes "$NOTES" --target "${{ github.sha }}" $PRERELEASE_FLAG
           fi
