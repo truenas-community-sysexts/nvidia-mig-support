@@ -4,6 +4,26 @@ This repo produces **two** systemd-sysext extensions for TrueNAS SCALE on an NVI
 
 Replaces the previous scale-build-based pipeline. See `refactor-mig-only-sysext.md` for history.
 
+## Workstation Edition one-time setup
+
+NVIDIA Workstation Edition cards (RTX PRO 6000 included) ship in **graphics mode** by default. MIG requires **compute mode**. The mode is **stored in GPU firmware** — once switched, it persists across reboots, driver swaps, and OS reinstalls. You only do this once per physical card.
+
+If `nvidia-smi -mig 1` fails on a Workstation Edition card with a permission-style error, you need `displaymodeselector`. NVIDIA distributes it separately from the driver:
+
+1. Download "DisplayModeSelector Tool" from the [NVIDIA developer portal](https://developer.nvidia.com/displaymodeselector) (free account required, approval usually immediate)
+2. Extract: `tar xzf DisplayModeSelector-*.tar.gz`
+3. SCP the binary to TrueNAS, then:
+
+   ```bash
+   chmod +x displaymodeselector
+   sudo ./displaymodeselector --gpumode compute
+   sudo reboot
+   ```
+
+Note: `/home`, `/tmp`, and `/data` on TrueNAS are mounted `noexec`. Run `displaymodeselector` from somewhere it can execute (move it into `/root` or run via the dynamic linker: `/lib64/ld-linux-x86-64.so.2 ./displaymodeselector ...`).
+
+Server Edition cards and previous-gen workstation cards (e.g. RTX A6000) don't need this — they ship in compute mode.
+
 ## High-level
 
 ```
