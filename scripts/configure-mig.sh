@@ -443,7 +443,7 @@ case "$confirm" in
     [nN]*) echo "Discarded."; exit 0 ;;
 esac
 
-# --- Apply via midclt: stop → update → start, per app ---
+# --- Apply via midclt: stop → update → restore-to-original-state, per app ---
 # Stop before update because app.update implicitly runs `compose up
 # --force-recreate`. Against an already-running container that can fail
 # with a "container name already in use" conflict, after which middleware
@@ -452,15 +452,29 @@ esac
 # Use `midclt call -j` so the call waits for the underlying job and
 # propagates its exit status. Capture stderr (instead of >/dev/null'ing
 # it) so a real failure surfaces to the user.
+#
+# Record original state first so a stopped app stays stopped after we
+# apply its GPU config — don't unexpectedly start an app the user chose
+# to disable.
 for i in "${!STAGED_APP[@]}"; do
     app="${STAGED_APP[$i]}"
     echo "  ${app} <-- device ${STAGED_DEV[$i]} (${STAGED_DTYPE[$i]})"
 
-    printf "    Stopping..."
-    if err=$(midclt call -j app.stop "$app" 2>&1); then
-        echo " OK"
-    else
-        echo " WARN (continuing): $err"
+    orig_state=$(midclt call app.get_instance "$app" 2>/dev/null \
+        | python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('state',''))
+except: print('')" 2>/dev/null)
+    echo "    Original state: ${orig_state:-unknown}"
+    was_running=false
+    [ "$orig_state" = "RUNNING" ] && was_running=true
+
+    if $was_running; then
+        printf "    Stopping..."
+        if err=$(midclt call -j app.stop "$app" 2>&1); then
+            echo " OK"
+        else
+            echo " WARN (continuing): $err"
+        fi
     fi
 
     printf "    Applying GPU config..."
@@ -470,16 +484,23 @@ for i in "${!STAGED_APP[@]}"; do
     else
         echo " FAILED:"
         echo "$err" | sed 's/^/      /'
-        # Try to restart so we don't leave the app stopped after a failure
-        midclt call -j app.start "$app" >/dev/null 2>&1 || true
+        # Restore the app to its original state on failure — only start it
+        # back up if it was actually running before we touched it.
+        if $was_running; then
+            midclt call -j app.start "$app" >/dev/null 2>&1 || true
+        fi
         continue
     fi
 
-    printf "    Starting..."
-    if err=$(midclt call -j app.start "$app" 2>&1); then
-        echo " OK"
+    if $was_running; then
+        printf "    Starting..."
+        if err=$(midclt call -j app.start "$app" 2>&1); then
+            echo " OK"
+        else
+            echo " WARN: $err"
+        fi
     else
-        echo " WARN: $err"
+        echo "    Leaving stopped (was not running originally)"
     fi
 done
 
