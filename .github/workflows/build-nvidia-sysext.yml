@@ -100,10 +100,12 @@ jobs:
           TrueNAS: ${{ inputs.truenas_version }}
           MIG bundled: ${{ inputs.bundle_mig }}
           Built from commit: ${{ github.sha }}"
+          PRERELEASE_FLAG=""
+          if [[ "$TAG" == dev-* ]]; then PRERELEASE_FLAG="--prerelease"; fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/nvidia.raw dist/nvidia.raw.sha256 --clobber
-            gh release edit "$TAG" --notes "$NOTES" --target "${{ github.sha }}"
+            gh release edit "$TAG" --notes "$NOTES" --target "${{ github.sha }}" $PRERELEASE_FLAG
           else
             gh release create "$TAG" dist/nvidia.raw dist/nvidia.raw.sha256 \
-              --title "$TAG" --notes "$NOTES" --target "${{ github.sha }}"
+              --title "$TAG" --notes "$NOTES" --target "${{ github.sha }}" $PRERELEASE_FLAG
           fi
