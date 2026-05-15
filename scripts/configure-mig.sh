@@ -35,6 +35,100 @@ done
 
 [ "$(id -u)" -eq 0 ] || { echo "ERROR: must run as root" >&2; exit 1; }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers (defined before any call site)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Returns 0 if the comma-separated profile list is plausibly valid, 1 otherwise.
+# Catches the cheap-to-check foot-guns:
+#   - total slice budget > 4
+#   - per-profile instance count exceeds NVIDIA's max for that profile
+#   - +me.all mixed with profiles that need media engines
+#   - more than one OFA-claiming profile (only 1 OFA on the GPU)
+# Subtler placement conflicts fall through to nvidia-smi at MIG creation time.
+validate_mig_profiles() {
+    local profiles="$1"
+    local arr p slices total=0 ok=true
+    IFS=',' read -ra arr <<< "$profiles"
+    [ "${#arr[@]}" -gt 0 ] || { echo "ERROR: empty profile list" >&2; return 1; }
+
+    declare -A count_of
+    for p in "${arr[@]}"; do
+        case "$p" in
+            14|21|47|65|67) slices=1 ;;
+            5|35|64|66)     slices=2 ;;
+            0|32)           slices=4 ;;
+            *) echo "ERROR: unknown profile ID '$p' (valid: 0 5 14 21 32 35 47 64 65 66 67)" >&2; ok=false; continue ;;
+        esac
+        total=$((total + slices))
+        count_of[$p]=$((${count_of[$p]:-0} + 1))
+    done
+
+    if [ "$total" -gt 4 ]; then
+        echo "ERROR: slice budget exceeded — your list uses $total slices, max is 4" >&2
+        ok=false
+    fi
+
+    # Per-profile max instances per nvidia-smi mig -lgip on Blackwell
+    declare -A max_of=(
+        [0]=1  [21]=1 [32]=1 [64]=1 [65]=1
+        [5]=2  [35]=2 [66]=2
+        [14]=4 [47]=4 [67]=4
+    )
+    for p in "${!count_of[@]}"; do
+        if [ "${count_of[$p]}" -gt "${max_of[$p]:-99}" ]; then
+            echo "ERROR: profile $p allows max ${max_of[$p]} instance(s); your list has ${count_of[$p]}" >&2
+            ok=false
+        fi
+    done
+
+    # Media-engine constraint: RTX PRO 6000 Blackwell has 4 NVDEC, 4 NVENC,
+    # 4 NVJPG, 1 OFA. The +me.all profiles (64, 65) grab ALL of them, so any
+    # other instance in the same config must be -me (66, 67).
+    local has_me_all=false
+    for p in "${arr[@]}"; do
+        case "$p" in 64|65) has_me_all=true ;; esac
+    done
+    if $has_me_all; then
+        for p in "${arr[@]}"; do
+            case "$p" in
+                64|65|66|67) ;;
+                *) echo "ERROR: profile $p cannot coexist with +me.all (64 or 65) — that variant grabs all media engines, so other instances must be -me (66 or 67)" >&2; ok=false ;;
+            esac
+        done
+    fi
+
+    # OFA is single — only one OFA engine on the GPU, claimed by profiles
+    # 21 (+me), 64 (+me.all), 65 (+me.all). At most one of those can appear.
+    local ofa_count=0
+    for p in "${arr[@]}"; do
+        case "$p" in 21|64|65) ofa_count=$((ofa_count + 1)) ;; esac
+    done
+    if [ "$ofa_count" -gt 1 ]; then
+        echo "ERROR: only 1 OFA engine on the GPU, but $ofa_count profiles in the list claim it (21/64/65). Pick one." >&2
+        ok=false
+    fi
+
+    $ok
+}
+
+profile_label() {
+    case "$1" in
+        47) echo "gfx + compute (1g.24gb)" ;;
+        35) echo "gfx + compute (2g.48gb)" ;;
+        32) echo "gfx + compute (4g.96gb)" ;;
+        14) echo "compute only (1g.24gb)" ;;
+        5)  echo "compute only (2g.48gb)" ;;
+        0)  echo "compute only (4g.96gb)" ;;
+        64) echo "compute + all media engines (2g.48gb)" ;;
+        21) echo "compute + media + OFA (1g.24gb)" ;;
+        65) echo "compute + all media engines (1g.24gb)" ;;
+        67) echo "compute, no media (1g.24gb)" ;;
+        66) echo "compute, no media (2g.48gb)" ;;
+        *)  echo "profile $1" ;;
+    esac
+}
+
 # --- Resolve persistent dir ---
 if [ -n "$PERSIST_PATH" ]; then
     PERSIST_DIR="$PERSIST_PATH"
@@ -178,97 +272,6 @@ fi
 echo "MIG devices created: ${#MIG_UUIDS[@]}"
 
 IFS=',' read -ra PROFILE_ARRAY <<< "$MIG_PROFILES"
-
-# Returns 0 if the comma-separated profile list is plausibly valid, 1 otherwise.
-# Catches the two cheap-to-check foot-guns:
-#   - total slice budget > 4
-#   - per-profile instance count exceeds NVIDIA's max for that profile
-# Subtler placement conflicts (media-engine partitioning, OFA-in-multiple-instances)
-# fall through to nvidia-smi at MIG creation time.
-validate_mig_profiles() {
-    local profiles="$1"
-    local arr p slices total=0 ok=true
-    IFS=',' read -ra arr <<< "$profiles"
-    [ "${#arr[@]}" -gt 0 ] || { echo "ERROR: empty profile list" >&2; return 1; }
-
-    declare -A count_of
-    for p in "${arr[@]}"; do
-        case "$p" in
-            14|21|47|65|67) slices=1 ;;
-            5|35|64|66)     slices=2 ;;
-            0|32)           slices=4 ;;
-            *) echo "ERROR: unknown profile ID '$p' (valid: 0 5 14 21 32 35 47 64 65 66 67)" >&2; ok=false; continue ;;
-        esac
-        total=$((total + slices))
-        count_of[$p]=$((${count_of[$p]:-0} + 1))
-    done
-
-    if [ "$total" -gt 4 ]; then
-        echo "ERROR: slice budget exceeded — your list uses $total slices, max is 4" >&2
-        ok=false
-    fi
-
-    # Per-profile max instances per nvidia-smi mig -lgip on Blackwell
-    declare -A max_of=(
-        [0]=1  [21]=1 [32]=1 [64]=1 [65]=1
-        [5]=2  [35]=2 [66]=2
-        [14]=4 [47]=4 [67]=4
-    )
-    for p in "${!count_of[@]}"; do
-        if [ "${count_of[$p]}" -gt "${max_of[$p]:-99}" ]; then
-            echo "ERROR: profile $p allows max ${max_of[$p]} instance(s); your list has ${count_of[$p]}" >&2
-            ok=false
-        fi
-    done
-
-    # Media-engine constraint: RTX PRO 6000 Blackwell has 4 NVDEC, 4 NVENC,
-    # 4 NVJPG, 1 OFA. The +me.all profiles (64, 65) grab ALL of them, so any
-    # other instance in the same config must be -me (66, 67) — otherwise
-    # that instance asks for media engines that have been taken.
-    local has_me_all=false
-    for p in "${arr[@]}"; do
-        case "$p" in 64|65) has_me_all=true ;; esac
-    done
-    if $has_me_all; then
-        for p in "${arr[@]}"; do
-            case "$p" in
-                64|65|66|67) ;;
-                *) echo "ERROR: profile $p cannot coexist with +me.all (64 or 65) — that variant grabs all media engines, so other instances must be -me (66 or 67)" >&2; ok=false ;;
-            esac
-        done
-    fi
-
-    # OFA is single — only one OFA engine on the GPU, claimed by profiles
-    # 21 (+me), 64 (+me.all), 65 (+me.all). At most one of those three can
-    # appear in a config.
-    local ofa_count=0
-    for p in "${arr[@]}"; do
-        case "$p" in 21|64|65) ofa_count=$((ofa_count + 1)) ;; esac
-    done
-    if [ "$ofa_count" -gt 1 ]; then
-        echo "ERROR: only 1 OFA engine on the GPU, but $ofa_count profiles in the list claim it (21/64/65). Pick one." >&2
-        ok=false
-    fi
-
-    $ok
-}
-
-profile_label() {
-    case "$1" in
-        47) echo "gfx + compute (1g.24gb)" ;;
-        35) echo "gfx + compute (2g.48gb)" ;;
-        32) echo "gfx + compute (4g.96gb)" ;;
-        14) echo "compute only (1g.24gb)" ;;
-        5)  echo "compute only (2g.48gb)" ;;
-        0)  echo "compute only (4g.96gb)" ;;
-        64) echo "compute + all media engines (2g.48gb)" ;;
-        21) echo "compute + media + OFA (1g.24gb)" ;;
-        65) echo "compute + all media engines (1g.24gb)" ;;
-        67) echo "compute, no media (1g.24gb)" ;;
-        66) echo "compute, no media (2g.48gb)" ;;
-        *)  echo "profile $1" ;;
-    esac
-}
 
 if $SKIP_APP_MAPPING || [ "${APP_COUNT:-0}" -eq 0 ]; then
     echo ""
