@@ -56,7 +56,7 @@ MIG UUIDs are **deterministic** on Blackwell — same GPU + same profile config 
 
 ## Persistent storage layout
 
-```
+```text
 /mnt/<pool>/.config/nvidia-gpu/
   nvidia-original.raw          # stock backup (kept across uninstalls)
   nvidia.raw                   # custom driver (full-driver path only)
@@ -106,8 +106,8 @@ After a TrueNAS update the first boot is longer (the restore dance adds 5–10 s
 
 | Script | What it undoes |
 | --- | --- |
-| `uninstall-mig-sysext.sh` | Removes `/etc/extensions/nvidia-mig.raw` symlink, re-merges sysext, deregisters PREINIT entry. Stock driver is untouched (was untouched all along). |
-| `uninstall-nvidia-sysext.sh` | Restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters PREINIT, wipes persistent custom but keeps the stock backup. Requires reboot to load the matching kernel modules. |
+| `uninstall-mig-sysext.sh` *(bundled as `/usr/bin/uninstall-nvidia-mig`)* | Removes `/etc/extensions/nvidia-mig.raw` symlink, re-merges sysext, deregisters PREINIT entry. Stock driver is untouched (was untouched all along). |
+| `uninstall-nvidia-sysext.sh` *(bundled as `/usr/bin/uninstall-nvidia-driver`)* | Restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters PREINIT, wipes persistent custom but keeps the stock backup. Requires reboot to load the matching kernel modules. |
 | `recover-stock-nvidia.sh` | Extracts a fresh stock `nvidia.raw` from the official TrueNAS `.update` archive (two-level squashfs peel). Use when no `nvidia-original.raw` backup exists. |
 
 ## Why this design

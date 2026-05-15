@@ -2,8 +2,14 @@
 # Remove the lightweight nvidia-mig sysext deployed by install-mig-sysext.sh.
 # Does NOT touch the stock TrueNAS nvidia.raw or any MIG mode state.
 #
-# Usage: sudo ./uninstall-mig-sysext.sh [--keep-persist]
-#   --keep-persist  Leave the persistent copy at /mnt/<pool>/.config/nvidia-gpu/nvidia-mig.raw
+# This script is also bundled into nvidia-mig.raw as /usr/bin/uninstall-nvidia-mig
+# so users can run `sudo uninstall-nvidia-mig` after install without a curl|bash.
+# When invoked from the bundled location, `systemd-sysext unmerge` below will
+# remove the merged copy of this very script mid-execution. That's safe — bash
+# reads the script into memory at parse time. Do NOT add code below the unmerge
+# that exec()s a binary or sources a file from the bundled sysext; only system
+# binaries (rm, systemctl, midclt, python3) and shell builtins are safe to use
+# after unmerge.
 
 set -euo pipefail
 
