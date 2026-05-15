@@ -229,15 +229,38 @@ mkdir -p "$PERSIST_DIR"
 # --- Pre-flight ---
 [ -x /usr/bin/nvidia-smi ] || { echo "ERROR: /usr/bin/nvidia-smi missing (sysext not merged?)" >&2; exit 1; }
 
-DRIVER_VER=$(/usr/bin/nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>&1 | head -1)
-case "$DRIVER_VER" in
-    *"version mismatch"*|*"Failed"*)
-        echo "ERROR: nvidia-smi reports driver/library mismatch — reboot is required first." >&2
-        echo "       $DRIVER_VER" >&2
-        exit 1
-        ;;
-esac
-echo "Driver: $DRIVER_VER"
+# nvidia-smi can fail in two distinct ways here:
+#   1. Driver/library mismatch — user installed the full-driver sysext but
+#      hasn't rebooted yet; kernel modules are still the previous version
+#      while userspace libs are the new one.
+#   2. Any other init failure (no GPU, driver not loaded, etc.).
+#
+# Wrap the call in an explicit if-test so a failure produces a visible
+# error. The previous form `DRIVER_VER=$(... 2>&1 | head -1)` could be
+# silently killed by `set -euo pipefail` on a non-zero nvidia-smi exit
+# (the pipeline returns non-zero, pipefail propagates it, and bash
+# terminates the script before the case statement is reached).
+if DRIVER_VER=$(/usr/bin/nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null); then
+    echo "Driver: $DRIVER_VER"
+else
+    NVIDIA_ERR=$(/usr/bin/nvidia-smi 2>&1 || true)
+    if echo "$NVIDIA_ERR" | grep -qi "version mismatch"; then
+        echo "" >&2
+        echo "ERROR: kernel modules and userspace libraries are different driver versions." >&2
+        echo "       This is expected immediately after install-nvidia-sysext.sh and" >&2
+        echo "       resolves itself after a reboot loads matching kernel modules." >&2
+        echo "" >&2
+        echo "       Reboot first, then re-run configure-mig:" >&2
+        echo "" >&2
+        echo "         sudo reboot" >&2
+        echo "" >&2
+        echo "       (nvidia-smi reported: $(echo "$NVIDIA_ERR" | head -1))" >&2
+    else
+        echo "ERROR: /usr/bin/nvidia-smi failed to query the GPU:" >&2
+        echo "$NVIDIA_ERR" | sed 's/^/       /' >&2
+    fi
+    exit 1
+fi
 
 [ -x /usr/bin/nvidia-mig-setup ] || { echo "ERROR: /usr/bin/nvidia-mig-setup missing — run install-{mig,nvidia}-sysext.sh first." >&2; exit 1; }
 
@@ -254,18 +277,25 @@ if [ -z "$MIG_PROFILES" ]; then
 Profile IDs (RTX PRO 6000 Blackwell, 96 GB total, 4 slices).
 GPU has 4 NVDEC, 4 NVENC, 4 NVJPG, 1 OFA total — distributed below.
 
-  ID  Profile           DEC ENC JPG OFA  GFX  Max instances
-  14  1g.24gb            1   1   1   -   no   4              ← most common
-  21  1g.24gb+me         1   1   1   1   no   1   (claims OFA)
-  47  1g.24gb+gfx        1   1   1   -   yes  4
-  65  1g.24gb+me.all     4   4   4   1   no   1   (claims ALL media + OFA)
-  67  1g.24gb-me         -   -   -   -   no   4
-   5  2g.48gb            2   2   2   -   no   2
-  35  2g.48gb+gfx        2   2   2   -   yes  2
-  64  2g.48gb+me.all     4   4   4   1   no   1   (claims ALL media + OFA)
-  66  2g.48gb-me         -   -   -   -   no   2
-   0  4g.96gb            4   4   4   1   no   1   (whole GPU)
-  32  4g.96gb+gfx        4   4   4   1   yes  1   (whole GPU)
+Suffix     Meaning
+(none)     compute + 1 of each media engine
++gfx       adds OpenGL / Vulkan / DirectX support
++me        compute + media engines including OFA (max 1 per GPU)
++me.all    grabs all media engines exclusively (max 1, mutually exclusive)
+-me        pure compute, no media engines
+
+  ID  Profile         DEC ENC JPG OFA GFX  Max
+  14  1g.24gb          1   1   1   -   -    4
+  21  1g.24gb+me       1   1   1   1   -    1
+  47  1g.24gb+gfx      1   1   1   -   Y    4
+  65  1g.24gb+me.all   4   4   4   1   -    1
+  67  1g.24gb-me       -   -   -   -   -    4
+   5  2g.48gb          2   2   2   -   -    2
+  35  2g.48gb+gfx      2   2   2   -   Y    2
+  64  2g.48gb+me.all   4   4   4   1   -    1
+  66  2g.48gb-me       -   -   -   -   -    2
+   0  4g.96gb          4   4   4   1   -    1
+  32  4g.96gb+gfx      4   4   4   1   Y    1
 
 Slice budget: 1g = 1 slice, 2g = 2 slices, 4g = 4 slices. Total ≤ 4.
 
