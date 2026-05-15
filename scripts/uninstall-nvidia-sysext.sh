@@ -2,6 +2,16 @@
 # Restore stock nvidia.raw from /mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw
 # and remove the full-driver PREINIT entry. Counterpart to install-nvidia-sysext.sh.
 #
+# This script is also bundled into the custom nvidia.raw as
+# /usr/bin/uninstall-nvidia-driver so users can run
+# `sudo uninstall-nvidia-driver` after install without a curl|bash.
+# When invoked from the bundled location, `systemd-sysext unmerge` below will
+# remove the merged copy of this very script mid-execution. That's safe — bash
+# reads the script into memory at parse time. Do NOT add code below the unmerge
+# that exec()s a binary or sources a file from the bundled sysext; only stable
+# system binaries (cp, rm, systemctl, midclt, python3, zfs) are safe to use
+# after unmerge.
+#
 # Usage: sudo ./uninstall-nvidia-sysext.sh [--keep-persist]
 #   --keep-persist  Leave /mnt/<pool>/.config/nvidia-gpu/ contents in place
 

@@ -93,10 +93,12 @@ It validates your profile list (slice budget, instance caps, `+me.all` / OFA con
 
 ## Uninstall
 
+Both uninstall scripts are bundled into the sysext at install time, so you don't need a curl one-liner — just run them locally once the sysext is merged.
+
 Lightweight:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/uninstall-mig-sysext.sh | sudo bash
+sudo uninstall-nvidia-mig
 ```
 
 Removes the symlink, re-merges sysext, deregisters the PREINIT entry. The stock NVIDIA driver was never touched, so nothing else needs to change.
@@ -104,24 +106,32 @@ Removes the symlink, re-merges sysext, deregisters the PREINIT entry. The stock 
 Full driver:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/uninstall-nvidia-sysext.sh | sudo bash
+sudo uninstall-nvidia-driver
 sudo reboot
 ```
 
 Restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters PREINIT, wipes the persistent custom (but keeps the stock backup). The reboot is required for the kernel modules to reload at the stock driver's version.
 
+**Fallback** — if the sysext somehow isn't merged (e.g. corrupted, or you're recovering a host that lost its `/etc/extensions/` symlink), curl-bash still works:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/uninstall-mig-sysext.sh | sudo bash
+# or
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/uninstall-nvidia-sysext.sh | sudo bash
+```
+
 ## Scripts reference
 
-All scripts support `--help` for the full flag list. The two install scripts also bundle `configure-mig` into your `PATH` so routine reconfig doesn't need network access.
+All scripts support `--help` for the full flag list. The install scripts bundle `configure-mig` and the matching `uninstall-*` command into your `PATH` so routine reconfig and teardown don't need network access.
 
 | Script | Run when | What it does |
 | --- | --- | --- |
 | [`install-mig-sysext.sh`](scripts/install-mig-sysext.sh) | Adding MIG to a host that keeps TrueNAS's stock driver | Downloads `nvidia-mig.raw` from the rolling `dev-mig-sysext` release, deploys it next to the stock sysext, registers a TrueNAS PREINIT entry. No reboot. |
 | [`install-nvidia-sysext.sh`](scripts/install-nvidia-sysext.sh) | Replacing TrueNAS's stock driver with a custom one | Downloads `nvidia.raw` from the rolling `dev-nvidia-sysext` release (currently 580.126.18), swaps the stock sysext, registers a PREINIT entry that re-applies after TrueNAS updates. **Reboot required.** |
 | [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Before `install-nvidia-sysext.sh` if you don't already have a stock backup | Pulls the stock `nvidia.raw` out of the official TrueNAS `.update` archive and stores it as `nvidia-original.raw` for later restore. |
-| `configure-mig` *(bundled in both sysexts)* | After install, and any time you want to change the MIG layout | Validates your MIG profile string, writes `mig.conf`, restarts the MIG service, then walks you through assigning each MIG device to a TrueNAS app. |
-| [`uninstall-mig-sysext.sh`](scripts/uninstall-mig-sysext.sh) | Removing the lightweight sysext | Removes the symlink, re-merges sysext, deregisters PREINIT. Stock driver untouched. |
-| [`uninstall-nvidia-sysext.sh`](scripts/uninstall-nvidia-sysext.sh) | Restoring stock driver after a full-driver install | Restores stock `nvidia.raw` from the backup, deregisters PREINIT. **Reboot required.** |
+| `configure-mig` *(bundled in both sysexts at `/usr/bin/configure-mig`)* | After install, and any time you want to change the MIG layout | Validates your MIG profile string, writes `mig.conf`, restarts the MIG service, then walks you through assigning each MIG device to a TrueNAS app. |
+| `uninstall-nvidia-mig` *(bundled in the lightweight sysext at `/usr/bin/uninstall-nvidia-mig`; source: [`uninstall-mig-sysext.sh`](scripts/uninstall-mig-sysext.sh))* | Removing the lightweight sysext | Removes the symlink, re-merges sysext, deregisters PREINIT. Stock driver untouched. |
+| `uninstall-nvidia-driver` *(bundled in the full-driver sysext at `/usr/bin/uninstall-nvidia-driver`; source: [`uninstall-nvidia-sysext.sh`](scripts/uninstall-nvidia-sysext.sh))* | Restoring stock driver after a full-driver install | Restores stock `nvidia.raw` from the backup, deregisters PREINIT. **Reboot required.** |
 
 ## More
 

@@ -38,6 +38,13 @@ chmod 0755 "${STAGE}/usr/bin/nvidia-mig-setup"
 cp "${REPO_ROOT}/scripts/configure-mig.sh" "${STAGE}/usr/bin/configure-mig"
 chmod 0755 "${STAGE}/usr/bin/configure-mig"
 
+# Bundle the uninstall script at /usr/bin/uninstall-nvidia-mig so users
+# can tear down with `sudo uninstall-nvidia-mig` instead of a curl|bash.
+# Bash reads the script into memory at parse time, so the script keeps
+# running fine after `systemd-sysext unmerge` removes the merged copy.
+cp "${REPO_ROOT}/scripts/uninstall-mig-sysext.sh" "${STAGE}/usr/bin/uninstall-nvidia-mig"
+chmod 0755 "${STAGE}/usr/bin/uninstall-nvidia-mig"
+
 cp "${REPO_ROOT}/sysext/usr/lib/systemd/system/nvidia-mig-setup.service" \
    "${STAGE}/usr/lib/systemd/system/nvidia-mig-setup.service"
 chmod 0644 "${STAGE}/usr/lib/systemd/system/nvidia-mig-setup.service"

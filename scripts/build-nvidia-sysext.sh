@@ -489,7 +489,13 @@ if $BUNDLE_MIG; then
     # it's available locally once the sysext is merged — no network needed.
     cp "$REPO_ROOT/scripts/configure-mig.sh" "$STAGING_DIR/usr/bin/configure-mig"
     chmod 0755 "$STAGING_DIR/usr/bin/configure-mig"
-    ok "MIG script + service + configure-mig bundled (PREINIT activation handled by install-nvidia-sysext.sh)"
+    # Bundle the uninstall script at /usr/bin/uninstall-nvidia-driver so
+    # users can revert to stock with `sudo uninstall-nvidia-driver` instead
+    # of a curl|bash. Bash reads the script into memory at parse time, so
+    # the script keeps running fine after the sysext is unmerged mid-flow.
+    cp "$REPO_ROOT/scripts/uninstall-nvidia-sysext.sh" "$STAGING_DIR/usr/bin/uninstall-nvidia-driver"
+    chmod 0755 "$STAGING_DIR/usr/bin/uninstall-nvidia-driver"
+    ok "MIG + configure-mig + uninstall-nvidia-driver bundled (PREINIT activation handled by install-nvidia-sysext.sh)"
 else
     info "Skipping MIG bundle (--no-mig-bundle)"
 fi
