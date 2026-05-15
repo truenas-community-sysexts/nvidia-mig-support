@@ -277,18 +277,25 @@ if [ -z "$MIG_PROFILES" ]; then
 Profile IDs (RTX PRO 6000 Blackwell, 96 GB total, 4 slices).
 GPU has 4 NVDEC, 4 NVENC, 4 NVJPG, 1 OFA total — distributed below.
 
-  ID  Profile           DEC ENC JPG OFA  GFX  Max instances
-  14  1g.24gb            1   1   1   -   no   4              ← most common
-  21  1g.24gb+me         1   1   1   1   no   1   (claims OFA)
-  47  1g.24gb+gfx        1   1   1   -   yes  4
-  65  1g.24gb+me.all     4   4   4   1   no   1   (claims ALL media + OFA)
-  67  1g.24gb-me         -   -   -   -   no   4
-   5  2g.48gb            2   2   2   -   no   2
-  35  2g.48gb+gfx        2   2   2   -   yes  2
-  64  2g.48gb+me.all     4   4   4   1   no   1   (claims ALL media + OFA)
-  66  2g.48gb-me         -   -   -   -   no   2
-   0  4g.96gb            4   4   4   1   no   1   (whole GPU)
-  32  4g.96gb+gfx        4   4   4   1   yes  1   (whole GPU)
+Suffix     Meaning
+(none)     compute + 1 of each media engine
++gfx       adds OpenGL / Vulkan / DirectX support
++me        compute + media engines including OFA (max 1 per GPU)
++me.all    grabs all media engines exclusively (max 1, mutually exclusive)
+-me        pure compute, no media engines
+
+  ID  Profile         DEC ENC JPG OFA GFX  Max
+  14  1g.24gb          1   1   1   -   -    4
+  21  1g.24gb+me       1   1   1   1   -    1
+  47  1g.24gb+gfx      1   1   1   -   Y    4
+  65  1g.24gb+me.all   4   4   4   1   -    1
+  67  1g.24gb-me       -   -   -   -   -    4
+   5  2g.48gb          2   2   2   -   -    2
+  35  2g.48gb+gfx      2   2   2   -   Y    2
+  64  2g.48gb+me.all   4   4   4   1   -    1
+  66  2g.48gb-me       -   -   -   -   -    2
+   0  4g.96gb          4   4   4   1   -    1
+  32  4g.96gb+gfx      4   4   4   1   Y    1
 
 Slice budget: 1g = 1 slice, 2g = 2 slices, 4g = 4 slices. Total ≤ 4.
 
