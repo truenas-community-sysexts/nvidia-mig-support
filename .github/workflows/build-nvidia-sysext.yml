@@ -32,7 +32,6 @@ on:
         default: ''
   push:
     branches:
-      - refactor/dual-sysext
       - main
     paths:
       - 'scripts/build-nvidia-sysext.sh'

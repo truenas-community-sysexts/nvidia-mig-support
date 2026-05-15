@@ -2,7 +2,7 @@
 
 This repo produces **two** systemd-sysext extensions for TrueNAS SCALE on an NVIDIA Blackwell host, plus a small set of management scripts. Users pick one of two install paths depending on whether they trust the driver TrueNAS ships or need a specific version.
 
-Replaces the previous scale-build-based pipeline. See `refactor-mig-only-sysext.md` for history.
+Replaces the previous scale-build-based pipeline. See [refactor-history.md](refactor-history.md) for the design history.
 
 ## Workstation Edition one-time setup
 
@@ -131,10 +131,10 @@ Once built and attached to a release, install it from TrueNAS:
 ```bash
 # Download the artifact from your custom release
 curl -fL -o /tmp/nvidia.raw \
-  https://github.com/scyto/truenas-nvidia-rtx6000-pro-mig/releases/download/my-custom-release/nvidia.raw
+  https://github.com/truenas-community-sysexts/nvidia-mig-support/releases/download/my-custom-release/nvidia.raw
 
 # Hand it to install-nvidia-sysext.sh
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-nvidia-sysext.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-nvidia-sysext.sh \
   | sudo bash -s -- --sysext=/tmp/nvidia.raw
 ```
 

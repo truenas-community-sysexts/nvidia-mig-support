@@ -489,7 +489,7 @@ if $BUNDLE_MIG; then
     # it's available locally once the sysext is merged — no network needed.
     cp "$REPO_ROOT/scripts/configure-mig.sh" "$STAGING_DIR/usr/bin/configure-mig"
     chmod 0755 "$STAGING_DIR/usr/bin/configure-mig"
-    ok "MIG script + service + configure-mig bundled (PREINIT activation handled by install.sh)"
+    ok "MIG script + service + configure-mig bundled (PREINIT activation handled by install-nvidia-sysext.sh)"
 else
     info "Skipping MIG bundle (--no-mig-bundle)"
 fi
