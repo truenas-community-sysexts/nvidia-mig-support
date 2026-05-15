@@ -31,7 +31,7 @@
 
 set -euo pipefail
 
-DEFAULT_RELEASE_URL="https://github.com/scyto/truenas-nvidia-rtx6000-pro-mig/releases/download/dev-mig-sysext/nvidia-mig.raw"
+DEFAULT_RELEASE_URL="https://github.com/truenas-community-sysexts/nvidia-mig-support/releases/download/dev-mig-sysext/nvidia-mig.raw"
 STOCK_NVIDIA="/usr/share/truenas/sysext-extensions/nvidia.raw"
 MIN_DRIVER_MAJOR=570
 

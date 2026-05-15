@@ -36,7 +36,7 @@ $ journalctl -u nvidia-mig-setup.service -b 0
 **Fix:** Re-run the install — it will (re-)create the PREINIT entry:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-mig-sysext.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash
 ```
 
 Verify the PREINIT registration directly:
@@ -60,14 +60,14 @@ for s in json.load(sys.stdin):
 ```bash
 # Extract stock nvidia.raw from the official .update archive (~1.8 GB download).
 # Stages it as /mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw.
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/recover-stock-nvidia.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/recover-stock-nvidia.sh | sudo bash
 
 # Verify it's the version you expect (should be 570.172.08 on TrueNAS 25.10.x)
 sudo unsquashfs -l /mnt/*/.config/nvidia-gpu/nvidia-original.raw \
   | grep -oE '[0-9]{3}\.[0-9]+\.[0-9]+' | sort -u | head -3
 
 # Optional: actually swap it over the current live nvidia.raw
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/recover-stock-nvidia.sh | sudo bash -s -- --install
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/recover-stock-nvidia.sh | sudo bash -s -- --install
 sudo reboot
 ```
 
@@ -171,7 +171,7 @@ Or via the TrueNAS UI: Apps → app → Edit → Resources → NVIDIA GPU → pi
 **Fix:** First, check what your TrueNAS version actually ships — recent 25.10.x patches all pin 570.172.08, so an older detected version suggests a non-standard install. If you genuinely want to proceed:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-mig-sysext.sh | sudo bash -s -- --force
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash -s -- --force
 ```
 
 Or upgrade TrueNAS to a current patch level first.

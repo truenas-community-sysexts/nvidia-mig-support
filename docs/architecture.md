@@ -131,10 +131,10 @@ Once built and attached to a release, install it from TrueNAS:
 ```bash
 # Download the artifact from your custom release
 curl -fL -o /tmp/nvidia.raw \
-  https://github.com/scyto/truenas-nvidia-rtx6000-pro-mig/releases/download/my-custom-release/nvidia.raw
+  https://github.com/truenas-community-sysexts/nvidia-mig-support/releases/download/my-custom-release/nvidia.raw
 
 # Hand it to install-nvidia-sysext.sh
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-nvidia-sysext.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-nvidia-sysext.sh \
   | sudo bash -s -- --sysext=/tmp/nvidia.raw
 ```
 

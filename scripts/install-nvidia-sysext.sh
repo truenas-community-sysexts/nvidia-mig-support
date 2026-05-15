@@ -33,7 +33,7 @@
 
 set -euo pipefail
 
-DEFAULT_RELEASE_URL="https://github.com/scyto/truenas-nvidia-rtx6000-pro-mig/releases/download/dev-nvidia-sysext/nvidia.raw"
+DEFAULT_RELEASE_URL="https://github.com/truenas-community-sysexts/nvidia-mig-support/releases/download/dev-nvidia-sysext/nvidia.raw"
 SYSEXT_DIR="/usr/share/truenas/sysext-extensions"
 LIVE_NVIDIA="${SYSEXT_DIR}/nvidia.raw"
 
@@ -186,7 +186,7 @@ echo "Copied custom nvidia.raw to ${PERSIST_DIR}/nvidia.raw"
 # NOW — not after Docker is stopped and nvidia.raw has been swapped, which
 # would leave the box half-installed. Fetched from main (durable), not the
 # refactor branch (deleted post-merge).
-SCRIPT_URL_BASE="https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts"
+SCRIPT_URL_BASE="https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts"
 PREINIT_LOCAL="${PERSIST_DIR}/nvidia-preinit-full.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
 if [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/nvidia-preinit-full.sh" ]; then

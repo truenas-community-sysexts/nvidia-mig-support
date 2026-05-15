@@ -6,7 +6,7 @@ NVIDIA MIG (Multi-Instance GPU) tooling for TrueNAS SCALE hosts running an **RTX
 
 ```bash
 # On TrueNAS, as root:
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-mig-sysext.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash
 sudo configure-mig
 ```
@@ -42,7 +42,7 @@ It comes in two shapes because two different problems need solving:
 On TrueNAS, as root:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-mig-sysext.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash
 ```
 
@@ -65,10 +65,10 @@ On TrueNAS, as root:
 
 ```bash
 # First time only: ensure a stock-driver backup exists in /mnt/<pool>/.config/nvidia-gpu/
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/recover-stock-nvidia.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/recover-stock-nvidia.sh | sudo bash
 
 # Install
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-nvidia-sysext.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-nvidia-sysext.sh | sudo bash
 
 sudo reboot
 ```
@@ -96,7 +96,7 @@ It validates your profile list (slice budget, instance caps, `+me.all` / OFA con
 Lightweight:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/uninstall-mig-sysext.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/uninstall-mig-sysext.sh | sudo bash
 ```
 
 Removes the symlink, re-merges sysext, deregisters the PREINIT entry. The stock NVIDIA driver was never touched, so nothing else needs to change.
@@ -104,7 +104,7 @@ Removes the symlink, re-merges sysext, deregisters the PREINIT entry. The stock 
 Full driver:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/uninstall-nvidia-sysext.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/uninstall-nvidia-sysext.sh | sudo bash
 sudo reboot
 ```
 
