@@ -1,0 +1,109 @@
+name: Build Full NVIDIA Sysext
+
+on:
+  workflow_dispatch:
+    inputs:
+      nvidia_version:
+        description: 'NVIDIA driver version (e.g. 570.172.08, 580.126.18, 590.44.01)'
+        required: true
+        default: '570.172.08'
+      truenas_version:
+        description: 'TrueNAS version (e.g. 25.10.3.1)'
+        required: true
+        default: '25.10.3.1'
+      kernel_module_type:
+        description: 'NVIDIA kernel module flavor'
+        required: true
+        type: choice
+        options: [open, proprietary]
+        default: 'open'
+      truenas_codename:
+        description: 'TrueNAS codename (auto-detected for 25.x; leave empty for 26.x)'
+        required: false
+        default: ''
+      bundle_mig:
+        description: 'Bundle the MIG script + service into the sysext'
+        required: true
+        type: boolean
+        default: true
+      release_tag:
+        description: 'Optional: create a GitHub release with this tag (leave empty for artifact only)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show runner capacity
+        run: |
+          df -h /
+          free -h
+          gcc --version || true
+          gcc-14 --version || true
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-14 squashfs-tools kmod xz-utils \
+            bison flex libelf-dev bc rsync libssl-dev pkg-config \
+            pciutils gnupg ca-certificates wget curl
+
+      - name: Build nvidia.raw
+        env:
+          NVIDIA_VERSION: ${{ inputs.nvidia_version }}
+          TRUENAS_VERSION: ${{ inputs.truenas_version }}
+          NVIDIA_KERNEL_MODULE_TYPE: ${{ inputs.kernel_module_type }}
+          TRUENAS_CODENAME: ${{ inputs.truenas_codename }}
+        run: |
+          ARGS=(
+            --nvidia-version="$NVIDIA_VERSION"
+            --truenas-version="$TRUENAS_VERSION"
+            --kernel-module-type="$NVIDIA_KERNEL_MODULE_TYPE"
+            --out=dist
+          )
+          [ -n "$TRUENAS_CODENAME" ] && ARGS+=(--truenas-codename="$TRUENAS_CODENAME")
+          if [ "${{ inputs.bundle_mig }}" = "false" ]; then ARGS+=(--no-mig-bundle); fi
+          sudo -E scripts/build-nvidia-sysext.sh "${ARGS[@]}"
+
+      - name: Inspect output
+        run: |
+          ls -la dist/
+          du -h dist/nvidia.raw
+          echo "SHA256: $(cat dist/nvidia.raw.sha256)"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvidia-sysext-${{ inputs.nvidia_version }}-truenas-${{ inputs.truenas_version }}
+          path: |
+            dist/nvidia.raw
+            dist/nvidia.raw.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to release
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG='${{ inputs.release_tag }}'
+          NOTES="Full-driver nvidia.raw sysext.
+          Driver:  ${{ inputs.nvidia_version }} (${{ inputs.kernel_module_type }})
+          TrueNAS: ${{ inputs.truenas_version }}
+          MIG bundled: ${{ inputs.bundle_mig }}
+          Built from commit: ${{ github.sha }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/nvidia.raw dist/nvidia.raw.sha256 --clobber
+            gh release edit "$TAG" --notes "$NOTES" --target "${{ github.sha }}"
+          else
+            gh release create "$TAG" dist/nvidia.raw dist/nvidia.raw.sha256 \
+              --title "$TAG" --notes "$NOTES" --target "${{ github.sha }}"
+          fi
