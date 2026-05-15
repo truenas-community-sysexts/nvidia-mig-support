@@ -15,6 +15,18 @@
 #   sudo ./install-nvidia-sysext.sh --sysext=/tmp/x.raw
 #   sudo ./install-nvidia-sysext.sh --pool=fast
 #
+# Flags:
+#   --sysext=PATH          Local nvidia.raw to install (skips download)
+#   --pool=NAME            ZFS pool for persistent storage (skips auto-detect)
+#   --persist-path=PATH    Exact directory for persistent storage (overrides --pool)
+#   --skip-backup-check    Don't refuse if nvidia-original.raw backup is missing
+#                          (use at your own risk — you may be unable to recover
+#                          the stock driver later)
+#   -h, --help             Show this help and exit
+#
+# Pool selection priority: --persist-path > --pool > existing config dir > only
+# data pool > interactive prompt (multi-pool) > error (no tty + ambiguous).
+#
 # Requirements:
 #   - Stock nvidia.raw must be backed up first (run recover-stock-nvidia.sh
 #     if you don't have /mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw).
@@ -36,7 +48,7 @@ for arg in "$@"; do
         --pool=*) POOL_NAME="${arg#*=}" ;;
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         --skip-backup-check) SKIP_BACKUP_CHECK=true ;;
-        -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done

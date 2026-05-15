@@ -8,8 +8,20 @@
 #
 # Usage:
 #   sudo ./configure-mig.sh                        # interactive: prompt for profiles
-#   sudo ./configure-mig.sh --mig-profiles=14,14,14,14
-#   sudo ./configure-mig.sh --mig-profiles=14,14,14,14 --skip-app-mapping
+#   sudo ./configure-mig.sh --mig=14,14,14,14
+#   sudo ./configure-mig.sh --mig=14,14,14,14 --skip-app-mapping
+#
+# Flags:
+#   --mig=LIST            Comma-separated MIG profile IDs (e.g. 14,14,14,14).
+#                         Alias: --mig-profiles=LIST
+#   --pool=NAME           ZFS pool for mig.conf (skips auto-detect)
+#   --persist-path=PATH   Exact directory for mig.conf (overrides --pool)
+#   --skip-app-mapping    Create MIG instances but don't prompt for app
+#                         assignment. Useful for headless / scripted runs.
+#   -h, --help            Show this help and exit
+#
+# Pool selection priority: --persist-path > --pool > existing config dir > only
+# data pool > interactive prompt (multi-pool) > error (no tty + ambiguous).
 #
 # Writes /mnt/<pool>/.config/nvidia-gpu/mig.conf and triggers
 # nvidia-mig-setup.service to create the MIG instances now.
@@ -28,7 +40,7 @@ for arg in "$@"; do
         --pool=*) POOL_NAME="${arg#*=}" ;;
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         --skip-app-mapping) SKIP_APP_MAPPING=true ;;
-        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done

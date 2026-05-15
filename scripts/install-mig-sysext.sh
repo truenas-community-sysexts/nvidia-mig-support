@@ -12,6 +12,17 @@
 #   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw
 #   sudo ./install-mig-sysext.sh --pool=fast
 #
+# Flags:
+#   --sysext=PATH         Local nvidia-mig.raw to install (skips download)
+#   --pool=NAME           ZFS pool for persistent storage (skips auto-detect)
+#   --persist-path=PATH   Exact directory for persistent storage (overrides --pool)
+#   --force               Bypass the stock-driver-version pre-flight check
+#                         (refuses on stock driver major <570 without --force)
+#   -h, --help            Show this help and exit
+#
+# Pool selection priority: --persist-path > --pool > existing config dir > only
+# data pool > interactive prompt (multi-pool) > error (no tty + ambiguous).
+#
 # Assumes the stock TrueNAS nvidia.raw is already merged (provides drivers).
 
 set -euo pipefail
@@ -32,7 +43,7 @@ for arg in "$@"; do
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         --force) FORCE=true ;;
         -h|--help)
-            sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
