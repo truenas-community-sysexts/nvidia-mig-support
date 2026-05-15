@@ -152,16 +152,6 @@ jobs:
           path: /tmp/truenas.update
           key: truenas-update-${{ needs.resolve.outputs.truenas_version }}
 
-      - name: Save TrueNAS .update to cache
-        # Only on cache miss. If the build fails after the .update download,
-        # we skip saving — the cost is one re-download on the next run, which
-        # is acceptable. (Matches hailo's pattern.)
-        if: steps.update-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: /tmp/truenas.update
-          key: truenas-update-${{ needs.resolve.outputs.truenas_version }}
-
       - name: Build nvidia.raw
         env:
           NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
@@ -182,6 +172,18 @@ jobs:
           fi
           if [ "$BUNDLE_MIG" = "false" ]; then ARGS+=(--no-mig-bundle); fi
           sudo -E scripts/build-nvidia-sysext.sh "${ARGS[@]}"
+
+      - name: Save TrueNAS .update to cache
+        # Save AFTER the build script has downloaded /tmp/truenas.update on
+        # a cache miss. Placed here (not next to Restore) so the file exists
+        # when Save runs. On cache hit, no save needed. If the build fails
+        # after the download, the save is skipped — one re-download next run
+        # is an acceptable cost. (Matches hailo's pattern.)
+        if: steps.update-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: /tmp/truenas.update
+          key: truenas-update-${{ needs.resolve.outputs.truenas_version }}
 
       - name: Inspect output
         run: |
