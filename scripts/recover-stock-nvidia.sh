@@ -203,7 +203,7 @@ elif [ "$STOCK_SIZE" -gt 700000000 ]; then
     echo "WARN: extracted nvidia.raw is unexpectedly large (${STOCK_SIZE} bytes); verify before installing"
 fi
 
-# --- 4. Stage as nvidia-original.raw for restore.sh to find next time ---
+# --- 4. Stage as nvidia-original.raw for uninstall-nvidia-sysext.sh next time ---
 cp "$STOCK" "${PERSIST}/nvidia-original.raw"
 echo ""
 echo "Staged: ${PERSIST}/nvidia-original.raw"

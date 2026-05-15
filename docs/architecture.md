@@ -2,7 +2,7 @@
 
 This repo produces **two** systemd-sysext extensions for TrueNAS SCALE on an NVIDIA Blackwell host, plus a small set of management scripts. Users pick one of two install paths depending on whether they trust the driver TrueNAS ships or need a specific version.
 
-Replaces the previous scale-build-based pipeline. See `refactor-mig-only-sysext.md` for history.
+Replaces the previous scale-build-based pipeline. See [refactor-history.md](refactor-history.md) for the design history.
 
 ## Workstation Edition one-time setup
 

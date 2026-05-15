@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Deploy the lightweight nvidia-mig sysext on TrueNAS.
-# This is the mechanical sysext install only — it does NOT configure MIG
-# profiles, register a PREINIT script, or touch app assignments. Use the
-# full install.sh for that (Phase 3, not yet rewritten).
+#
+# Adds MIG tooling alongside TrueNAS's stock NVIDIA driver. Copies
+# nvidia-mig.raw to persistent storage, symlinks into /etc/extensions/,
+# re-merges sysext, and registers a TrueNAS PREINIT entry so MIG instances
+# are recreated on every boot. Does NOT configure MIG profiles or assign
+# MIG devices to apps — run `sudo configure-mig` (bundled in the sysext)
+# for that.
 #
 # Default: downloads the latest dev build from the dev-mig-sysext release.
 # Override with --sysext=PATH for a local file.
@@ -43,7 +47,7 @@ for arg in "$@"; do
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         --force) FORCE=true ;;
         -h|--help)
-            sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;

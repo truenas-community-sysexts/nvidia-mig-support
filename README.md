@@ -2,6 +2,19 @@
 
 NVIDIA MIG (Multi-Instance GPU) tooling for TrueNAS SCALE hosts running an **RTX PRO 6000 Blackwell**. Two sysext flavors plus a small set of scripts.
 
+## tl;dr
+
+```bash
+# On TrueNAS, as root:
+curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-mig-sysext.sh \
+  | sudo bash
+sudo configure-mig
+```
+
+That's the lightweight path — adds MIG tooling alongside TrueNAS's stock NVIDIA driver. No reboot, no driver replacement. Stops working only if TrueNAS's stock driver doesn't support MIG on your GPU (570.x+ on Blackwell does — confirmed on RTX PRO 6000).
+
+If you need a different driver version, see [Install — full driver](#install--full-driver) below.
+
 ## Why this exists
 
 TrueNAS SCALE bundles an NVIDIA driver, but doesn't ship the MIG setup glue: nothing creates instances at boot, nothing remaps app GPU UUIDs when MIG instances are recreated, and nothing makes that survive a TrueNAS update. This repo fills those gaps.
@@ -18,22 +31,9 @@ It comes in two shapes because two different problems need solving:
 
 **Recommended starting point: lightweight.** TrueNAS 25.10.x's stock 570.172.08 driver supports MIG on the RTX PRO 6000 Blackwell (hardware-confirmed). Only reach for the full driver if you've verified you actually need a different version.
 
-## Scripts at a glance
-
-All scripts are designed to be run as one-liners via `curl | sudo bash` on TrueNAS. The two install scripts also bundle `configure-mig` into your `PATH` so you don't need network access for routine reconfig.
-
-| Script | Run when | What it does |
-| --- | --- | --- |
-| [`install-mig-sysext.sh`](scripts/install-mig-sysext.sh) | Adding MIG to a host that keeps TrueNAS's stock driver | Downloads `nvidia-mig.raw` from the rolling `dev-mig-sysext` release, deploys it next to the stock sysext, registers a TrueNAS PREINIT entry. No reboot. |
-| [`install-nvidia-sysext.sh`](scripts/install-nvidia-sysext.sh) | Replacing TrueNAS's stock driver with a custom one | Downloads `nvidia.raw` from the rolling `dev-nvidia-sysext` release (currently 580.126.18), swaps the stock sysext, registers a PREINIT entry that re-applies after TrueNAS updates. **Reboot required.** |
-| [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Before `install-nvidia-sysext.sh` if you don't already have a stock backup | Pulls the stock `nvidia.raw` out of the official TrueNAS `.update` archive and stores it as `nvidia-original.raw` for later restore. |
-| `configure-mig` *(bundled in both sysexts)* | After install, and any time you want to change the MIG layout | Validates your MIG profile string, writes `mig.conf`, restarts the MIG service, then walks you through assigning each MIG device to a TrueNAS app. |
-| [`uninstall-mig-sysext.sh`](scripts/uninstall-mig-sysext.sh) | Removing the lightweight sysext | Removes the symlink, re-merges sysext, deregisters PREINIT. Stock driver untouched. |
-| [`uninstall-nvidia-sysext.sh`](scripts/uninstall-nvidia-sysext.sh) | Restoring stock driver after a full-driver install | Restores stock `nvidia.raw` from the backup, deregisters PREINIT. **Reboot required.** |
-
 ## Prerequisites
 
-- TrueNAS SCALE 25.10 or later
+- TrueNAS SCALE 25.10 or later (older versions ship pre-570.x drivers, which we don't validate)
 - An NVIDIA GPU that supports MIG (RTX PRO 6000 Blackwell confirmed)
 - Workstation Edition cards: a one-time `displaymodeselector` switch into compute mode (see [docs/architecture.md](docs/architecture.md#workstation-edition-one-time-setup))
 
@@ -55,7 +55,7 @@ curl -fsSL .../scripts/install-mig-sysext.sh | sudo bash -s -- --pool=fast
 # or pass --persist-path=/mnt/fast/.config/nvidia-gpu for full control
 ```
 
-See `sudo install-mig-sysext.sh --help` (or run any of the install scripts with `--help` locally) for all flags. Run `sudo configure-mig` next (see [Configure MIG](#configure-mig) below).
+Then `sudo configure-mig` to set up your MIG layout — see [Configure MIG](#configure-mig) below.
 
 ## Install — full driver
 
@@ -110,12 +110,26 @@ sudo reboot
 
 Restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters PREINIT, wipes the persistent custom (but keeps the stock backup). The reboot is required for the kernel modules to reload at the stock driver's version.
 
+## Scripts reference
+
+All scripts support `--help` for the full flag list. The two install scripts also bundle `configure-mig` into your `PATH` so routine reconfig doesn't need network access.
+
+| Script | Run when | What it does |
+| --- | --- | --- |
+| [`install-mig-sysext.sh`](scripts/install-mig-sysext.sh) | Adding MIG to a host that keeps TrueNAS's stock driver | Downloads `nvidia-mig.raw` from the rolling `dev-mig-sysext` release, deploys it next to the stock sysext, registers a TrueNAS PREINIT entry. No reboot. |
+| [`install-nvidia-sysext.sh`](scripts/install-nvidia-sysext.sh) | Replacing TrueNAS's stock driver with a custom one | Downloads `nvidia.raw` from the rolling `dev-nvidia-sysext` release (currently 580.126.18), swaps the stock sysext, registers a PREINIT entry that re-applies after TrueNAS updates. **Reboot required.** |
+| [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Before `install-nvidia-sysext.sh` if you don't already have a stock backup | Pulls the stock `nvidia.raw` out of the official TrueNAS `.update` archive and stores it as `nvidia-original.raw` for later restore. |
+| `configure-mig` *(bundled in both sysexts)* | After install, and any time you want to change the MIG layout | Validates your MIG profile string, writes `mig.conf`, restarts the MIG service, then walks you through assigning each MIG device to a TrueNAS app. |
+| [`uninstall-mig-sysext.sh`](scripts/uninstall-mig-sysext.sh) | Removing the lightweight sysext | Removes the symlink, re-merges sysext, deregisters PREINIT. Stock driver untouched. |
+| [`uninstall-nvidia-sysext.sh`](scripts/uninstall-nvidia-sysext.sh) | Restoring stock driver after a full-driver install | Restores stock `nvidia.raw` from the backup, deregisters PREINIT. **Reboot required.** |
+
 ## More
 
 - [docs/architecture.md](docs/architecture.md) — what's inside each sysext, the PREINIT activation flow, build pipeline, `displaymodeselector` one-time setup
 - [docs/mig-persistence.md](docs/mig-persistence.md) — how MIG state survives reboots and TrueNAS updates
 - [docs/mig-profiles.md](docs/mig-profiles.md) — full NVIDIA profile reference for RTX PRO 6000 Blackwell with engine counts
-- [docs/refactor-mig-only-sysext.md](docs/refactor-mig-only-sysext.md) — design history of this refactor
+- [docs/troubleshooting.md](docs/troubleshooting.md) — common failure modes and what to do about them
+- [docs/refactor-history.md](docs/refactor-history.md) — design history of this refactor
 
 ## Credits
 
