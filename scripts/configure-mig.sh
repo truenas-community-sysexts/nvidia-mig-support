@@ -237,9 +237,13 @@ for attempt in $(seq 1 24); do
 done
 echo ""
 
-# --- Run nvidia-mig-setup.service (creates instances) ---
-echo "Starting nvidia-mig-setup.service (creates MIG instances)..."
-systemctl start nvidia-mig-setup.service || { echo "ERROR: systemctl start failed"; exit 1; }
+# --- Run nvidia-mig-setup.service (destroys + creates MIG instances) ---
+# Must use 'restart', not 'start'. The service is Type=oneshot with
+# RemainAfterExit=yes; once it's run this boot, `systemctl start` becomes
+# a no-op and the old MIG instances remain. `restart` forces re-execution,
+# which re-reads mig.conf and applies the new profile list.
+echo "Restarting nvidia-mig-setup.service (re-running with new profiles)..."
+systemctl restart nvidia-mig-setup.service || { echo "ERROR: systemctl restart failed"; exit 1; }
 systemctl status nvidia-mig-setup.service --no-pager -n 0 | head -3 || true
 
 # --- Re-enable Docker ---
