@@ -152,3 +152,76 @@ jobs:
           make_latest: ${{ needs.resolve.outputs.mark_latest }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Auto-build hardware-test issue. Mirrors build-nvidia-sysext.yml's
+      # pattern. MIG checklist is shorter — no driver swap, no reboot.
+      - name: Create hardware-test issue for auto-build
+        if: needs.resolve.outputs.mark_latest == 'false'
+        uses: actions/github-script@v9
+        env:
+          TAG: ${{ needs.resolve.outputs.release_tag }}
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+        with:
+          script: |
+            const tag = process.env.TAG;
+            const title = `Hardware test: TrueNAS ${process.env.TRUENAS_VERSION} / MIG sysext (${tag})`;
+            const releaseUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`;
+
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'hardware-test',
+                color: 'FBCA04',
+                description: 'Auto-build awaiting hardware verification',
+              });
+              console.log('Created hardware-test label');
+            } catch (e) {
+              if (e.status === 422) {
+                console.log('hardware-test label already exists');
+              } else {
+                throw e;
+              }
+            }
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'hardware-test',
+              per_page: 100,
+            });
+            if (existing.data.some(i => i.title.includes(tag))) {
+              console.log(`Open hardware-test issue already exists for ${tag} — skipping`);
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ['hardware-test'],
+              body: [
+                `An auto-build published a new MIG sysext release that needs hardware verification before being promoted to **Latest**.`,
+                ``,
+                `**Release:** [${tag}](${releaseUrl})`,
+                `**TrueNAS:** ${process.env.TRUENAS_VERSION}`,
+                ``,
+                `### Pre-flight`,
+                `- [ ] Host has TrueNAS's stock NVIDIA driver merged (>= 570).`,
+                ``,
+                `### Install`,
+                `- [ ] \`sudo bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/main/scripts/install-mig-sysext.sh)" -- --release=${tag}\``,
+                `- [ ] No reboot required; \`systemd-sysext\` merges the new sysext live.`,
+                ``,
+                `### Verify`,
+                `- [ ] \`systemd-sysext status\` shows \`nvidia-mig\` merged alongside \`nvidia\`.`,
+                `- [ ] \`configure-mig\` (bundled in the sysext) runs to completion and creates MIG instances.`,
+                `- [ ] Assign a MIG profile to a TrueNAS app and confirm \`nvidia-smi -L\` from inside the app shows the expected slice.`,
+                `- [ ] Reboot and confirm MIG instances are recreated by the registered PREINIT.`,
+                ``,
+                `### Promote`,
+                `Once verified, open the [release page](${releaseUrl}) and click **Set as latest**, then close this issue.`,
+              ].join('\n'),
+            });
+            console.log(`Created hardware-test issue for ${tag}`);

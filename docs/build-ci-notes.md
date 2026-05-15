@@ -70,4 +70,27 @@ The build workflow is split into `resolve` (`ubuntu-latest`, lightweight) and `b
 
 1. **Single source of truth for defaults.** `resolve` reads `.github/tracked-versions.json` and applies user inputs on top. The `build` job and any downstream consumer get one consistent view.
 2. **Cheap visibility.** When `resolve` fails (e.g., malformed tracked-versions, missing input), CI fails in ~30 seconds without spinning up a build runner.
-3. **Phase 4 prerequisite.** The forthcoming `check-releases.yml` will invoke this workflow via `workflow_call`. The resolve/build split lets that caller pass values directly into `resolve`'s outputs without having to mirror logic.
+3. **Cron-friendly.** The check-releases workflow uses `createWorkflowDispatch` to fire the build with explicit version inputs; `resolve` then computes the final tag and notes from those inputs without re-fetching anything.
+
+## Auto-cadence: `check-releases.yml`
+
+Daily cron at 06:00 UTC polls upstream version pointers and fires a build when anything changes. The flow:
+
+1. **Read** `.github/tracked-versions.json` for the currently-tracked TrueNAS + NVIDIA values.
+2. **Check TrueNAS:** highest stable tag in `truenas/scale-build`, gated on (a) the train being discoverable in the `download.truenas.com/` listing for that version, and (b) the matching `.update` file actually being downloadable. Tags can land hours before the `.update` is mirrored — the gate avoids bumping into a half-published state.
+3. **Check NVIDIA:** `https://download.nvidia.com/XFree86/Linux-x86_64/latest.txt` advertises a single `<version> <run-file-path>` line. We accept whatever it says (no branch cap, no Frigate-style pin) — we follow NVIDIA's "latest" verbatim, currently whichever branch their CDN promotes. If that turns out to be too aggressive, the cap belongs here, not in the build.
+4. **Commit + push** the in-place update to `tracked-versions.json` (default `GITHUB_TOKEN` is sufficient because main is unprotected on this repo; if a ruleset is added later, swap to a PAT — see the comment at the top of `check-releases.yml`).
+5. **Dispatch builds** via `actions/github-script` + `createWorkflowDispatch`:
+   - `build-nvidia-sysext.yml` whenever **either** TrueNAS or NVIDIA changed (full driver is parameterized by both).
+   - `build-mig-sysext.yml` only on TrueNAS bumps (MIG content doesn't depend on NVIDIA driver version).
+   Both are dispatched with `mark_latest='false'`.
+
+## Hardware-test issue auto-creation
+
+When a build runs with `mark_latest=false` (the auto-cadence case), the build workflow creates a GitHub issue labeled `hardware-test`. The issue links to the new release and carries a per-build checklist (install, verify driver/MIG works, reboot test, then "Set as latest" + close).
+
+`mark_latest=false` is the gate. A human verifies on real hardware, clicks **Set as latest** on the release page, then closes the issue. The default for manual `workflow_dispatch` is `mark_latest=true` — intentional human builds are promoted immediately, no issue is created.
+
+Label / issue creation is idempotent: existing labels return 422 (handled), and if an open `hardware-test` issue already mentions the release tag in its title, the step skips the duplicate creation. So manually re-triggering an auto-build won't spam the tracker.
+
+Promotion to "Latest" can't be done automatically — it requires human acknowledgement that hardware verification passed. The flag and the issue together encode that pre-merge / post-merge gate.
