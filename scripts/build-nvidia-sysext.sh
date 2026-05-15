@@ -66,6 +66,9 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-${REPO_ROOT}/dist}"
 mkdir -p "$OUT_DIR"
+# Resolve to absolute — the script chdirs into $BUILD_DIR in Phase 3, after
+# which a relative --out would point at the wrong location at squashfs time.
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 # Build/staging dirs (large; live in /tmp for tmpfs speed on hosts that have it)
 STAGE1_DIR="/tmp/stage1"
