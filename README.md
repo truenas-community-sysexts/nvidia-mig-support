@@ -48,7 +48,14 @@ curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mi
 
 Downloads `nvidia-mig.raw` from the rolling `dev-mig-sysext` prerelease, copies it to your persistent pool, symlinks it into `/etc/extensions/`, merges the sysext, and registers a TrueNAS PREINIT entry so MIG instances are recreated on every boot. **No reboot required** — the stock driver keeps running.
 
-Run `sudo configure-mig` next (see [Configure MIG](#configure-mig) below).
+Multi-pool host? The script auto-picks the right pool when there's an existing config dir or only one data pool; otherwise it prompts. To skip detection and pin the pool explicitly:
+
+```bash
+curl -fsSL .../scripts/install-mig-sysext.sh | sudo bash -s -- --pool=fast
+# or pass --persist-path=/mnt/fast/.config/nvidia-gpu for full control
+```
+
+See `sudo install-mig-sysext.sh --help` (or run any of the install scripts with `--help` locally) for all flags. Run `sudo configure-mig` next (see [Configure MIG](#configure-mig) below).
 
 ## Install — full driver
 

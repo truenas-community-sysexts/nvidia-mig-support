@@ -13,6 +13,8 @@
 #   sudo ./recover-stock-nvidia.sh --version=25.10.3.1
 #   sudo ./recover-stock-nvidia.sh --update-file=/path/to/preloaded.update
 #   sudo ./recover-stock-nvidia.sh --keep-workdir   # leave the ~2 GB download in place
+#   sudo ./recover-stock-nvidia.sh --pool=fast      # explicit pool (auto-detects + prompts otherwise)
+#   sudo ./recover-stock-nvidia.sh --persist-path=/mnt/fast/.config/nvidia-gpu
 
 set -euo pipefail
 
@@ -20,6 +22,8 @@ VERSION=""
 UPDATE_FILE=""
 DO_INSTALL=false
 KEEP_WORKDIR=false
+POOL_NAME=""
+PERSIST_PATH=""
 
 for arg in "$@"; do
     case "$arg" in
@@ -27,6 +31,8 @@ for arg in "$@"; do
         --update-file=*) UPDATE_FILE="${arg#*=}" ;;
         --install) DO_INSTALL=true ;;
         --keep-workdir) KEEP_WORKDIR=true ;;
+        --pool=*) POOL_NAME="${arg#*=}" ;;
+        --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
@@ -46,16 +52,95 @@ case "$VERSION" in
     *) echo "ERROR: unsupported version pattern: $VERSION" >&2; exit 1 ;;
 esac
 
-POOL=$(zpool list -H -o name 2>/dev/null | grep -v '^boot-pool$' | head -1 || true)
-[ -n "$POOL" ] || { echo "ERROR: no data pool found (need somewhere with ~3 GB free)" >&2; exit 1; }
+# --- Resolve persistent storage location ---
+# resolve_persist_dir is duplicated verbatim across install-mig-sysext.sh,
+# install-nvidia-sysext.sh, configure-mig.sh, and recover-stock-nvidia.sh.
+# Inline (rather than sourced from a sibling file) so each script remains
+# a self-contained curl|bash artifact. Keep these copies in sync when
+# changing the function.
+resolve_persist_dir() {
+    PERSIST_DIR=""
+    local d p
+    local -a existing=() pools=() choices=()
+    local header n i
 
-WORK="/mnt/${POOL}/.config/nvidia-gpu/recovery"
-PERSIST="/mnt/${POOL}/.config/nvidia-gpu"
+    if [ -n "${PERSIST_PATH:-}" ]; then
+        PERSIST_DIR="$PERSIST_PATH"
+        return 0
+    fi
+    if [ -n "${POOL_NAME:-}" ]; then
+        PERSIST_DIR="/mnt/${POOL_NAME}/.config/nvidia-gpu"
+        return 0
+    fi
+
+    for d in /mnt/*/.config/nvidia-gpu; do
+        [ -d "$d" ] && existing+=("$d")
+    done
+
+    while IFS= read -r p; do
+        [ -n "$p" ] && [ "$p" != "boot-pool" ] && pools+=("$p")
+    done < <(zpool list -H -o name 2>/dev/null)
+
+    if [ "${#pools[@]}" -eq 0 ]; then
+        echo "ERROR: no data pool found (only boot-pool). Pass --pool=NAME or --persist-path=PATH." >&2
+        return 1
+    fi
+
+    if [ "${#existing[@]}" -eq 1 ]; then
+        PERSIST_DIR="${existing[0]}"
+        echo "Using existing nvidia-gpu config: $PERSIST_DIR"
+        return 0
+    fi
+    if [ "${#existing[@]}" -eq 0 ] && [ "${#pools[@]}" -eq 1 ]; then
+        PERSIST_DIR="/mnt/${pools[0]}/.config/nvidia-gpu"
+        echo "Auto-selected pool: ${pools[0]} → $PERSIST_DIR"
+        return 0
+    fi
+
+    if [ "${#existing[@]}" -gt 1 ]; then
+        header="Found existing nvidia-gpu configs on multiple pools:"
+        choices=("${existing[@]}")
+    else
+        header="No existing nvidia-gpu config. Multiple data pools available:"
+        for p in "${pools[@]}"; do
+            choices+=("/mnt/${p}/.config/nvidia-gpu")
+        done
+    fi
+
+    # /dev/tty the device node almost always exists; the real question is
+    # whether THIS process can open it. CI runners and daemons can't.
+    # `: < /dev/tty` forces an open() call and fails fast if no controlling
+    # terminal is attached.
+    if ! { : </dev/tty; } 2>/dev/null; then
+        echo "ERROR: $header" >&2
+        echo "       No controlling terminal for prompt. Pass --pool=NAME or --persist-path=PATH." >&2
+        return 1
+    fi
+
+    echo "$header"
+    for i in "${!choices[@]}"; do
+        echo "  [$((i+1))] ${choices[$i]}"
+    done
+    while true; do
+        printf "Pick one (1-%d): " "${#choices[@]}"
+        read -r n </dev/tty || return 1
+        if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#choices[@]}" ]; then
+            PERSIST_DIR="${choices[$((n-1))]}"
+            echo "Selected: $PERSIST_DIR"
+            return 0
+        fi
+        echo "  Invalid. Enter 1-${#choices[@]}."
+    done
+}
+resolve_persist_dir || exit 1
+
+PERSIST="$PERSIST_DIR"
+WORK="${PERSIST}/recovery"
 SYSEXT_DIR="/usr/share/truenas/sysext-extensions"
 
 echo "=== Recover stock nvidia.raw ==="
 echo "Version:  $VERSION ($CODENAME)"
-echo "Pool:     $POOL"
+echo "Persist:  $PERSIST"
 echo "Workdir:  $WORK"
 echo ""
 

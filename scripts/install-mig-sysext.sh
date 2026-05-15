@@ -12,6 +12,17 @@
 #   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw
 #   sudo ./install-mig-sysext.sh --pool=fast
 #
+# Flags:
+#   --sysext=PATH         Local nvidia-mig.raw to install (skips download)
+#   --pool=NAME           ZFS pool for persistent storage (skips auto-detect)
+#   --persist-path=PATH   Exact directory for persistent storage (overrides --pool)
+#   --force               Bypass the stock-driver-version pre-flight check
+#                         (refuses on stock driver major <570 without --force)
+#   -h, --help            Show this help and exit
+#
+# Pool selection priority: --persist-path > --pool > existing config dir > only
+# data pool > interactive prompt (multi-pool) > error (no tty + ambiguous).
+#
 # Assumes the stock TrueNAS nvidia.raw is already merged (provides drivers).
 
 set -euo pipefail
@@ -32,7 +43,7 @@ for arg in "$@"; do
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         --force) FORCE=true ;;
         -h|--help)
-            sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
@@ -89,16 +100,93 @@ if [ ! -f "$SYSEXT_SRC" ]; then
 fi
 
 # --- Resolve persistent storage location ---
-if [ -n "$PERSIST_PATH" ]; then
-    PERSIST_DIR="$PERSIST_PATH"
-elif [ -n "$POOL_NAME" ]; then
-    PERSIST_DIR="/mnt/${POOL_NAME}/.config/nvidia-gpu"
-else
-    POOL_NAME=$(zpool list -H -o name 2>/dev/null | grep -v '^boot-pool$' | head -1 || true)
-    [ -n "$POOL_NAME" ] || { echo "ERROR: no ZFS pool found (excluding boot-pool). Pass --pool=NAME or --persist-path=PATH." >&2; exit 1; }
-    PERSIST_DIR="/mnt/${POOL_NAME}/.config/nvidia-gpu"
-    echo "Auto-detected pool: ${POOL_NAME}"
-fi
+# resolve_persist_dir is duplicated verbatim across install-mig-sysext.sh,
+# install-nvidia-sysext.sh, configure-mig.sh, and recover-stock-nvidia.sh.
+# Inline (rather than sourced from a sibling file) so each script remains
+# a self-contained curl|bash artifact. Keep these copies in sync when
+# changing the function.
+resolve_persist_dir() {
+    PERSIST_DIR=""
+    local d p
+    local -a existing=() pools=() choices=()
+    local header n i
+
+    # 1. Explicit --persist-path wins
+    if [ -n "${PERSIST_PATH:-}" ]; then
+        PERSIST_DIR="$PERSIST_PATH"
+        return 0
+    fi
+    # 2. Explicit --pool
+    if [ -n "${POOL_NAME:-}" ]; then
+        PERSIST_DIR="/mnt/${POOL_NAME}/.config/nvidia-gpu"
+        return 0
+    fi
+
+    # Discover existing nvidia-gpu config dirs
+    for d in /mnt/*/.config/nvidia-gpu; do
+        [ -d "$d" ] && existing+=("$d")
+    done
+
+    # Discover data pools (boot-pool excluded)
+    while IFS= read -r p; do
+        [ -n "$p" ] && [ "$p" != "boot-pool" ] && pools+=("$p")
+    done < <(zpool list -H -o name 2>/dev/null)
+
+    if [ "${#pools[@]}" -eq 0 ]; then
+        echo "ERROR: no data pool found (only boot-pool). Pass --pool=NAME or --persist-path=PATH." >&2
+        return 1
+    fi
+
+    # 3. Exactly one existing config → silent reuse
+    if [ "${#existing[@]}" -eq 1 ]; then
+        PERSIST_DIR="${existing[0]}"
+        echo "Using existing nvidia-gpu config: $PERSIST_DIR"
+        return 0
+    fi
+    # 4. No existing config + exactly one data pool → silent auto
+    if [ "${#existing[@]}" -eq 0 ] && [ "${#pools[@]}" -eq 1 ]; then
+        PERSIST_DIR="/mnt/${pools[0]}/.config/nvidia-gpu"
+        echo "Auto-selected pool: ${pools[0]} → $PERSIST_DIR"
+        return 0
+    fi
+
+    # 5/6. Genuine ambiguity — prompt
+    if [ "${#existing[@]}" -gt 1 ]; then
+        header="Found existing nvidia-gpu configs on multiple pools:"
+        choices=("${existing[@]}")
+    else
+        header="No existing nvidia-gpu config. Multiple data pools available:"
+        for p in "${pools[@]}"; do
+            choices+=("/mnt/${p}/.config/nvidia-gpu")
+        done
+    fi
+
+    # /dev/tty the device node almost always exists; the real question is
+    # whether THIS process can open it. CI runners and daemons can't.
+    # `: < /dev/tty` forces an open() call and fails fast if no controlling
+    # terminal is attached.
+    if ! { : </dev/tty; } 2>/dev/null; then
+        echo "ERROR: $header" >&2
+        echo "       No controlling terminal for prompt. Pass --pool=NAME or --persist-path=PATH." >&2
+        return 1
+    fi
+
+    echo "$header"
+    for i in "${!choices[@]}"; do
+        echo "  [$((i+1))] ${choices[$i]}"
+    done
+    while true; do
+        printf "Pick one (1-%d): " "${#choices[@]}"
+        read -r n </dev/tty || return 1
+        if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le "${#choices[@]}" ]; then
+            PERSIST_DIR="${choices[$((n-1))]}"
+            echo "Selected: $PERSIST_DIR"
+            return 0
+        fi
+        echo "  Invalid. Enter 1-${#choices[@]}."
+    done
+}
+resolve_persist_dir || exit 1
 
 echo "=== Install nvidia-mig sysext ==="
 echo "Source:      $SYSEXT_SRC"
