@@ -1,22 +1,37 @@
-# Refactor: Lightweight MIG-Only Sysext (No Build System)
+# Refactor: Dual-Sysext (No scale-build)
 
-## Status (2026-05-14, Phase 1 complete on hardware)
+## Status (2026-05-14, Phases 1 + 2 complete on hardware)
 
-Phase 1 of this refactor is implemented and validated on a TrueNAS 25.10.3.1 box with an RTX PRO 6000 Blackwell:
+Both halves of the dual-sysext refactor are implemented and validated on a TrueNAS 25.10.3.1 box with an RTX PRO 6000 Blackwell.
 
-- `scripts/build-mig-sysext.sh` builds a 4KB `nvidia-mig.raw` in <1s via `mksquashfs`.
-- `.github/workflows/build-mig-sysext.yml` rebuilds on every push to `refactor/dual-sysext` and auto-publishes the artifact to a rolling prerelease tagged `dev-mig-sysext`.
-- `scripts/install-mig-sysext.sh` is the deploy script. Pre-flight reads the stock driver version from `libnvidia-ml.so.X.Y.Z` filenames inside `/usr/share/truenas/sysext-extensions/nvidia.raw` (no driver load needed) and refuses on major <570 unless `--force`.
+### Phase 1 — lightweight `nvidia-mig.raw`
+
+- `scripts/build-mig-sysext.sh` builds a 4 KB `nvidia-mig.raw` in <1 s via `mksquashfs`.
+- `.github/workflows/build-mig-sysext.yml` rebuilds on every push to `refactor/dual-sysext` and auto-publishes to the rolling prerelease `dev-mig-sysext`.
+- `scripts/install-mig-sysext.sh` deploys it. Pre-flight reads the host's stock driver major version from `libnvidia-ml.so.X.Y.Z` filenames inside the stock `nvidia.raw` (no driver load needed) and refuses on major <570 unless `--force`.
 - `scripts/uninstall-mig-sysext.sh` reverses the deploy.
-- `scripts/recover-stock-nvidia.sh` extracts stock `nvidia.raw` from the official TrueNAS `.update` archive (two-level squashfs peel) when no `nvidia-original.raw` backup is available.
 
-**Activation strategy revised vs. the original plan below.** The plan assumed a sysext-shipped systemd unit with `WantedBy=multi-user.target` would auto-start at boot. On TrueNAS this is not reliable — the unit ends up `enabled` but `inactive (dead)` with zero journal entries (silent skip, never even queued). Confirmed across two reboots with WantedBy symlinks, `systemctl enable`, and `After=systemd-sysext.service` ordering all failing.
+### Phase 2 — full-driver `nvidia.raw`
 
-The working pattern: register a `midclt initshutdownscript.create` entry (`type=COMMAND`, `when=PREINIT`, command = `/usr/bin/systemctl start nvidia-mig-setup.service`). PREINIT runs early in boot, before Docker, after sysext merge. The service then runs normally with full journal output. This mirrors what `scripts/install.sh` has used for years for the full-driver path. See `agents.md` memory for the full lesson.
+- `scripts/build-nvidia-sysext.sh` ports biohazardious/truenas-nvidia-driver-updater's entrypoint.sh to a native GitHub Actions runner (no Docker). ~8 min on `ubuntu-24.04`. Pulls the official TrueNAS `.update`, peels both squashfs layers to find kernel headers + the system module tree, cross-compiles the chosen NVIDIA driver against those headers, captures all new files via a /usr+/etc snapshot diff, generates a combined `modules.dep`, and packages the lot with `mksquashfs -comp gzip` and an `ID=_any` extension-release. Phase 5b bundles the MIG script + service so the resulting `nvidia.raw` is self-contained.
+- `.github/workflows/build-nvidia-sysext.yml` is `workflow_dispatch`-only. Inputs: `nvidia_version`, `truenas_version`, `kernel_module_type`, `bundle_mig`, optional `release_tag`. (GitHub requires `workflow_dispatch` workflows on the default branch, so this YAML is also on `main` — it does nothing without an explicit dispatch.)
+- `scripts/install-nvidia-sysext.sh` deploys the full sysext. Refuses to swap unless `nvidia-original.raw` is on hand (run `scripts/recover-stock-nvidia.sh` first if missing — that script extracts stock `nvidia.raw` from the official `.update` archive via the same two-level squashfs peel). Drains GPU, unmerges sysext, ZFS-writable, swaps the raw, restores readonly, re-merges, registers a PREINIT entry, re-enables Docker, prints a reboot-required warning.
+- `scripts/nvidia-preinit-full.sh` is shipped to persistent storage and registered as PREINIT. Two responsibilities: (a) compare SHA of live `nvidia.raw` vs persistent custom and restore custom if /usr was wiped by a TrueNAS update; (b) start `nvidia-mig-setup.service` so MIG instances are recreated at boot.
+- `scripts/uninstall-nvidia-sysext.sh` restores stock from `nvidia-original.raw`, deregisters PREINIT, clears persistent custom (keeps the stock backup).
 
-The `.service` unit is still shipped inside the sysext — used for `systemctl start` manual operation, `systemctl status` last-run state, and `journalctl -u` for log inspection. Its `[Install]` section has been removed since we don't activate via WantedBy.
+### Key lessons captured along the way (see `agents.md` memory)
 
-**Outstanding work:** Phase 2 (full-driver native-runner workflow, biohazardious-style), Phase 4 (delete scale-build submodule + old workflows), README + docs/architecture.md rewrite. The plan below is the original Phase 1 design and is now of historical interest.
+- **Sysext-shipped systemd units need PREINIT activation, not `WantedBy`.** A `[Install] WantedBy=multi-user.target` symlink (whether inside the sysext, after `systemctl enable`, or with `After=systemd-sysext.service` ordering) is not reliably honored at boot on TrueNAS. The unit ends up `enabled` but `inactive (dead)` with zero journal entries. The working pattern is a `midclt initshutdownscript` entry of `type=COMMAND`, `when=PREINIT`, running `systemctl start <unit>`.
+- **Live driver swaps cause kernel/userspace mismatch.** Replacing `nvidia.raw` at runtime leaves the previous driver's kernel modules in memory. New userspace from the freshly-merged sysext then reports `Failed to initialize NVML: Driver/library version mismatch`. Fix: reboot. The full-driver install script prints an explicit reboot-required warning.
+- **MIG UUIDs are deterministic across both reboots AND driver swaps** on Blackwell. Verified bit-identical UUIDs across a Proxmox host power cycle, a TrueNAS-only reboot, and a 570.172.08 → 580.126.18 driver swap. UUIDs are a function of GPU + profile config, not driver version.
+
+### Outstanding work
+
+- Phase 3 (optional): fold `install-mig-sysext.sh` + `install-nvidia-sysext.sh` into a unified `install.sh` with `--replace-driver=<version>` if a single-entry-point UX is desired. The two scripts work fine standalone.
+- Phase 4: delete `scale-build/` submodule, `.github/workflows/build.yml`, `.github/workflows/check-nvidia-driver.yml`, `.github/workflows/check-truenas-release.yml`, `scripts/patch-driver-version.sh`, `scripts/strip-debug-packages.sh`, `scripts/create-dummy-packages.sh`, `scripts/setup-runner-vm.sh`, `.nvidia-driver-version`, old `install.sh`, old `restore.sh`, old `nvidia-preinit.sh`.
+- README + `docs/architecture.md` rewrite for the dual-sysext model.
+
+The original Phase 1 design from this doc (single-sysext, WantedBy-activated) is preserved below for historical reference; the as-built result differs in the ways noted above.
 
 ---
 
