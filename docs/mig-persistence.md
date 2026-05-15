@@ -21,7 +21,7 @@ Both install paths register a TrueNAS PREINIT entry via `midclt initshutdownscri
 
 A single command:
 
-```
+```sh
 /usr/bin/systemctl start nvidia-mig-setup.service
 ```
 
@@ -71,7 +71,7 @@ Pool auto-detected as the first non-`boot-pool` from `zpool list`. Override with
 
 ### Lightweight path
 
-```
+```text
 1. Kernel boots, modules load (stock 570.x driver from stock nvidia.raw)
 2. systemd-sysext merges nvidia.raw + nvidia-mig.raw + hailo.raw
 3. systemctl daemon-reload picks up nvidia-mig-setup.service unit
@@ -86,7 +86,7 @@ Total nvidia-mig-setup runtime: typically ~45 s (most of it the middleware-ready
 
 ### Full-driver path
 
-```
+```text
 1. Kernel boots, modules load from /usr/lib/modules/<kernel>/video/ (custom driver)
 2. systemd-sysext merges nvidia.raw (custom) + hailo.raw
 3. systemctl daemon-reload picks up nvidia-mig-setup.service unit
@@ -105,7 +105,7 @@ After a TrueNAS update the first boot is longer (the restore dance adds 5–10 s
 ## Uninstall / restore
 
 | Script | What it undoes |
-|---|---|
+| --- | --- |
 | `uninstall-mig-sysext.sh` | Removes `/etc/extensions/nvidia-mig.raw` symlink, re-merges sysext, deregisters PREINIT entry. Stock driver is untouched (was untouched all along). |
 | `uninstall-nvidia-sysext.sh` | Restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters PREINIT, wipes persistent custom but keeps the stock backup. Requires reboot to load the matching kernel modules. |
 | `recover-stock-nvidia.sh` | Extracts a fresh stock `nvidia.raw` from the official TrueNAS `.update` archive (two-level squashfs peel). Use when no `nvidia-original.raw` backup exists. |
