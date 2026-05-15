@@ -269,3 +269,90 @@ jobs:
           make_latest: ${{ needs.resolve.outputs.mark_latest }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Auto-builds (check-releases.yml passes mark_latest=false) need to be
+      # verified on real hardware before being promoted to "Latest". This
+      # step opens a tracked issue with a per-build checklist; closing it
+      # corresponds to "promoted" in the operator's workflow. Idempotent —
+      # skips if an open issue for this tag already exists.
+      # Mirrors hailo8-support's pattern.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Create hardware-test issue for auto-build
+        if: needs.resolve.outputs.mark_latest == 'false'
+        uses: actions/github-script@v9
+        env:
+          TAG: ${{ needs.resolve.outputs.release_tag }}
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+          NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
+          KERNEL_MODULE_TYPE: ${{ needs.resolve.outputs.kernel_module_type }}
+          BUNDLE_MIG: ${{ needs.resolve.outputs.bundle_mig }}
+        with:
+          script: |
+            const tag = process.env.TAG;
+            const title = `Hardware test: TrueNAS ${process.env.TRUENAS_VERSION} / NVIDIA ${process.env.NVIDIA_VERSION} (${tag})`;
+            const releaseUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`;
+
+            // Ensure the label exists (idempotent — 422 = "already exists").
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'hardware-test',
+                color: 'FBCA04',
+                description: 'Auto-build awaiting hardware verification',
+              });
+              console.log('Created hardware-test label');
+            } catch (e) {
+              if (e.status === 422) {
+                console.log('hardware-test label already exists');
+              } else {
+                throw e;
+              }
+            }
+
+            // Skip if an open issue already exists for this release tag.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'hardware-test',
+              per_page: 100,
+            });
+            if (existing.data.some(i => i.title.includes(tag))) {
+              console.log(`Open hardware-test issue already exists for ${tag} — skipping`);
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ['hardware-test'],
+              body: [
+                `An auto-build published a new full-driver nvidia.raw release that needs hardware verification before being promoted to **Latest**.`,
+                ``,
+                `**Release:** [${tag}](${releaseUrl})`,
+                `**TrueNAS:** ${process.env.TRUENAS_VERSION}`,
+                `**NVIDIA driver:** ${process.env.NVIDIA_VERSION} (${process.env.KERNEL_MODULE_TYPE} module)`,
+                `**MIG bundled:** ${process.env.BUNDLE_MIG}`,
+                ``,
+                `### Pre-flight`,
+                `- [ ] Confirm the host has a stock-nvidia backup (\`/mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw\`); run \`recover-stock-nvidia.sh\` if not.`,
+                ``,
+                `### Install`,
+                `- [ ] \`sudo bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/main/scripts/install-nvidia-sysext.sh)" -- --release=${tag}\``,
+                `- [ ] Reboot when the install script prompts.`,
+                ``,
+                `### Verify`,
+                `- [ ] \`nvidia-smi\` reports the new driver version with no NVML mismatch errors.`,
+                `- [ ] \`systemd-sysext status\` shows \`nvidia\` merged.`,
+                `- [ ] \`midclt call system.advanced.config | grep preinit\` shows the registered PREINIT script.`,
+                `- [ ] If \`BUNDLE_MIG=true\`: \`configure-mig\` runs without errors and assigns a profile to an app.`,
+                `- [ ] Reboot once more and confirm everything still works (PREINIT re-applies).`,
+                ``,
+                `### Promote`,
+                `Once verified, open the [release page](${releaseUrl}) and click **Set as latest**, then close this issue.`,
+              ].join('\n'),
+            });
+            console.log(`Created hardware-test issue for ${tag}`);
