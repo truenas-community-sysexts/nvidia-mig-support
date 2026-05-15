@@ -110,6 +110,13 @@ fi
 
 echo "Using MIG_PROFILES=$MIG_PROFILES"
 
+# --- Validate before writing anything ---
+if ! validate_mig_profiles "$MIG_PROFILES"; then
+    echo "" >&2
+    echo "Refusing to apply. See docs/mig-profiles.md for the slice budget and per-profile limits." >&2
+    exit 1
+fi
+
 # --- Write mig.conf ---
 cat > "$PERSIST_DIR/mig.conf" <<EOF
 # Written by configure-mig.sh on $(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -171,6 +178,51 @@ fi
 echo "MIG devices created: ${#MIG_UUIDS[@]}"
 
 IFS=',' read -ra PROFILE_ARRAY <<< "$MIG_PROFILES"
+
+# Returns 0 if the comma-separated profile list is plausibly valid, 1 otherwise.
+# Catches the two cheap-to-check foot-guns:
+#   - total slice budget > 4
+#   - per-profile instance count exceeds NVIDIA's max for that profile
+# Subtler placement conflicts (media-engine partitioning, OFA-in-multiple-instances)
+# fall through to nvidia-smi at MIG creation time.
+validate_mig_profiles() {
+    local profiles="$1"
+    local arr p slices total=0 ok=true
+    IFS=',' read -ra arr <<< "$profiles"
+    [ "${#arr[@]}" -gt 0 ] || { echo "ERROR: empty profile list" >&2; return 1; }
+
+    declare -A count_of
+    for p in "${arr[@]}"; do
+        case "$p" in
+            14|21|47|65|67) slices=1 ;;
+            5|35|64|66)     slices=2 ;;
+            0|32)           slices=4 ;;
+            *) echo "ERROR: unknown profile ID '$p' (valid: 0 5 14 21 32 35 47 64 65 66 67)" >&2; ok=false; continue ;;
+        esac
+        total=$((total + slices))
+        count_of[$p]=$((${count_of[$p]:-0} + 1))
+    done
+
+    if [ "$total" -gt 4 ]; then
+        echo "ERROR: slice budget exceeded — your list uses $total slices, max is 4" >&2
+        ok=false
+    fi
+
+    # Per-profile max instances per nvidia-smi mig -lgip on Blackwell
+    declare -A max_of=(
+        [0]=1  [21]=1 [32]=1 [64]=1 [65]=1
+        [5]=2  [35]=2 [66]=2
+        [14]=4 [47]=4 [67]=4
+    )
+    for p in "${!count_of[@]}"; do
+        if [ "${count_of[$p]}" -gt "${max_of[$p]:-99}" ]; then
+            echo "ERROR: profile $p allows max ${max_of[$p]} instance(s); your list has ${count_of[$p]}" >&2
+            ok=false
+        fi
+    done
+
+    $ok
+}
 
 profile_label() {
     case "$1" in
