@@ -35,6 +35,7 @@ on:
 
 permissions:
   contents: write
+  issues: write  # required by the auto-create hardware-test issue step (mark_latest=false path)
 
 jobs:
   resolve:
