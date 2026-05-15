@@ -18,6 +18,19 @@ It comes in two shapes because two different problems need solving:
 
 **Recommended starting point: lightweight.** TrueNAS 25.10.x's stock 570.172.08 driver supports MIG on the RTX PRO 6000 Blackwell (hardware-confirmed). Only reach for the full driver if you've verified you actually need a different version.
 
+## Scripts at a glance
+
+All scripts are designed to be run as one-liners via `curl | sudo bash` on TrueNAS. The two install scripts also bundle `configure-mig` into your `PATH` so you don't need network access for routine reconfig.
+
+| Script | Run when | What it does |
+| --- | --- | --- |
+| [`install-mig-sysext.sh`](scripts/install-mig-sysext.sh) | Adding MIG to a host that keeps TrueNAS's stock driver | Downloads `nvidia-mig.raw` from the rolling `dev-mig-sysext` release, deploys it next to the stock sysext, registers a TrueNAS PREINIT entry. No reboot. |
+| [`install-nvidia-sysext.sh`](scripts/install-nvidia-sysext.sh) | Replacing TrueNAS's stock driver with a custom one | Downloads `nvidia.raw` from the rolling `dev-nvidia-sysext` release (currently 580.126.18), swaps the stock sysext, registers a PREINIT entry that re-applies after TrueNAS updates. **Reboot required.** |
+| [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Before `install-nvidia-sysext.sh` if you don't already have a stock backup | Pulls the stock `nvidia.raw` out of the official TrueNAS `.update` archive and stores it as `nvidia-original.raw` for later restore. |
+| `configure-mig` *(bundled in both sysexts)* | After install, and any time you want to change the MIG layout | Validates your MIG profile string, writes `mig.conf`, restarts the MIG service, then walks you through assigning each MIG device to a TrueNAS app. |
+| [`uninstall-mig-sysext.sh`](scripts/uninstall-mig-sysext.sh) | Removing the lightweight sysext | Removes the symlink, re-merges sysext, deregisters PREINIT. Stock driver untouched. |
+| [`uninstall-nvidia-sysext.sh`](scripts/uninstall-nvidia-sysext.sh) | Restoring stock driver after a full-driver install | Restores stock `nvidia.raw` from the backup, deregisters PREINIT. **Reboot required.** |
+
 ## Prerequisites
 
 - TrueNAS SCALE 25.10 or later
@@ -39,36 +52,25 @@ Run `sudo configure-mig` next (see [Configure MIG](#configure-mig) below).
 
 ## Install — full driver
 
-When you need a specific driver version (e.g. you're on a TrueNAS release that ships an older driver and you want 580.x or 590.x).
+Uses the auto-built `dev-nvidia-sysext` rolling prerelease — currently **NVIDIA 580.126.18 on TrueNAS 25.10.3.1, open kernel modules**. The release is rebuilt on every push to `main`, so it's always current with the source.
 
-1. Trigger a build for the version you want — on your workstation:
+On TrueNAS, as root:
 
-   ```bash
-   gh workflow run build-nvidia-sysext.yml \
-     -f nvidia_version=580.126.18 \
-     -f truenas_version=25.10.3.1 \
-     -f kernel_module_type=open \
-     -f bundle_mig=true \
-     -f release_tag=dev-nvidia-sysext
-   ```
+```bash
+# First time only: ensure a stock-driver backup exists in /mnt/<pool>/.config/nvidia-gpu/
+curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/recover-stock-nvidia.sh | sudo bash
 
-   (~8 min on a GitHub Actions runner. The `dev-nvidia-sysext` tag also auto-refreshes on every push to `main` with the defaults above.)
+# Install
+curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-nvidia-sysext.sh | sudo bash
 
-2. On TrueNAS as root:
+sudo reboot
+```
 
-   ```bash
-   # First time only: make sure a stock-driver backup exists
-   curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/recover-stock-nvidia.sh | sudo bash
+After reboot, run `sudo configure-mig`.
 
-   # Install the custom driver
-   curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-nvidia-sysext.sh | sudo bash
+**The reboot is mandatory** — the previous driver's kernel modules are still loaded until then. `nvidia-smi` will report `Driver/library version mismatch` if you skip it.
 
-   sudo reboot
-   ```
-
-   **The reboot is mandatory** — the old driver's kernel modules are still loaded until then. `nvidia-smi` will report `Driver/library version mismatch` if you skip it.
-
-3. After reboot, run `sudo configure-mig`.
+Need a different driver version (e.g. you want 590.44.01 for TrueNAS 26.x, or you need proprietary kernel modules instead of open)? See [docs/architecture.md#building-a-custom-nvidiaraw](docs/architecture.md#building-a-custom-nvidiaraw).
 
 ## Configure MIG
 

@@ -100,6 +100,46 @@ Built on an `ubuntu-24.04` GitHub Actions runner (no Docker) in ~8 min. Ports bi
 
 Workflow dispatch input controls `nvidia_version`, `truenas_version`, `kernel_module_type` (open/proprietary), and whether to bundle MIG.
 
+## Building a custom nvidia.raw
+
+The rolling `dev-nvidia-sysext` release covers the common case: NVIDIA 580.126.18 + TrueNAS 25.10.3.1 + open kernel modules, auto-rebuilt on every push to `main`. If you want a different combination — newer driver, older driver, proprietary kernel modules, a different TrueNAS version — trigger a parameterized build via `workflow_dispatch`:
+
+```bash
+gh workflow run build-nvidia-sysext.yml \
+  -f nvidia_version=590.44.01 \
+  -f truenas_version=26.0.0-BETA.1 \
+  -f kernel_module_type=open \
+  -f bundle_mig=true \
+  -f release_tag=my-custom-release
+```
+
+Inputs:
+
+| Input | Default | Notes |
+| --- | --- | --- |
+| `nvidia_version` | `580.126.18` | Any version published at `us.download.nvidia.com/XFree86/Linux-x86_64/` |
+| `truenas_version` | `25.10.3.1` | Used to download the official `.update` file for kernel-header extraction |
+| `kernel_module_type` | `open` | `open` recommended for Blackwell; `proprietary` for legacy GPUs |
+| `truenas_codename` | *(auto)* | Auto-detected for 25.x (`Goldeye`); set explicitly for 26.x BETAs |
+| `bundle_mig` | `true` | Bundle our MIG script + service into the sysext |
+| `release_tag` | *(empty)* | If set, attach the built `nvidia.raw` to a GitHub release with this tag. `dev-*` tags get `--prerelease` automatically. |
+
+Build runs on `ubuntu-24.04` in ~8 min. The workflow itself lives at [.github/workflows/build-nvidia-sysext.yml](../.github/workflows/build-nvidia-sysext.yml); the build logic in [scripts/build-nvidia-sysext.sh](../scripts/build-nvidia-sysext.sh) — a native-runner port of [biohazardious/truenas-nvidia-driver-updater](https://github.com/biohazardious/truenas-nvidia-driver-updater) (no Docker, no scale-build).
+
+Once built and attached to a release, install it from TrueNAS:
+
+```bash
+# Download the artifact from your custom release
+curl -fL -o /tmp/nvidia.raw \
+  https://github.com/scyto/truenas-nvidia-rtx6000-pro-mig/releases/download/my-custom-release/nvidia.raw
+
+# Hand it to install-nvidia-sysext.sh
+curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts/install-nvidia-sysext.sh \
+  | sudo bash -s -- --sysext=/tmp/nvidia.raw
+```
+
+`--sysext=PATH` skips the default download from `dev-nvidia-sysext` and uses the file you provide.
+
 ## Boot-time activation: TrueNAS PREINIT
 
 The MIG setup service does NOT use `[Install] WantedBy=multi-user.target`. On TrueNAS, a sysext-shipped WantedBy symlink (or even `systemctl enable` post-merge) is not reliably honored at boot — the unit ends up `enabled` but `inactive (dead)` with zero journal entries. Confirmed across multiple reboots.
