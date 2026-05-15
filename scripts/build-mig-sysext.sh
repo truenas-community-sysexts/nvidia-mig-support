@@ -33,6 +33,11 @@ mkdir -p "${STAGE}/usr/bin" "${STAGE}/usr/lib/systemd/system"
 cp "${REPO_ROOT}/sysext/usr/bin/nvidia-mig-setup" "${STAGE}/usr/bin/nvidia-mig-setup"
 chmod 0755 "${STAGE}/usr/bin/nvidia-mig-setup"
 
+# Bundle the user-facing config helper so it lives at /usr/bin/configure-mig
+# once the sysext is merged — no need to curl the script over the network.
+cp "${REPO_ROOT}/scripts/configure-mig.sh" "${STAGE}/usr/bin/configure-mig"
+chmod 0755 "${STAGE}/usr/bin/configure-mig"
+
 cp "${REPO_ROOT}/sysext/usr/lib/systemd/system/nvidia-mig-setup.service" \
    "${STAGE}/usr/lib/systemd/system/nvidia-mig-setup.service"
 chmod 0644 "${STAGE}/usr/lib/systemd/system/nvidia-mig-setup.service"

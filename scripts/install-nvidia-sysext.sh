@@ -210,11 +210,13 @@ After reboot:
 
 Run: sudo reboot
 
-Then, to configure MIG profiles and map MIG devices to TrueNAS apps:
+DO NOT run configure-mig before rebooting — it will refuse with a
+driver/library-mismatch error. After the box is back up, the helper
+is available locally (bundled in the sysext) at /usr/bin/configure-mig:
 
-  curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/refactor/dual-sysext/scripts/configure-mig.sh \\
-    | sudo bash -s -- --mig-profiles=14,14,14,14
+  sudo configure-mig                       # interactive prompt
+  sudo configure-mig --mig=14,14,14,14     # non-interactive
 
-(or run without --mig-profiles for an interactive prompt; also walks you
-through MIG-device→app assignment).
+It writes mig.conf, runs the MIG service, and walks you through
+assigning MIG devices to your TrueNAS apps.
 EOF

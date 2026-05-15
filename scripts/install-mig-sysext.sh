@@ -197,15 +197,17 @@ fi
 echo ""
 if $OK; then
     cat <<EOF
-=== Install complete ===
+=== Install complete — ready to configure NOW (no reboot needed) ===
 
-Next: configure MIG profiles and map MIG devices to TrueNAS apps:
+The stock NVIDIA driver is still running, so MIG can be set up
+immediately. The config helper is bundled in the sysext at
+/usr/bin/configure-mig:
 
-  curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/refactor/dual-sysext/scripts/configure-mig.sh \\
-    | sudo bash -s -- --mig-profiles=14,14,14,14
+  sudo configure-mig                       # interactive prompt
+  sudo configure-mig --mig=14,14,14,14     # non-interactive
 
-(or run without --mig-profiles for an interactive prompt; the script also
-walks you through MIG-device→app assignment).
+It writes /mnt/<pool>/.config/nvidia-gpu/mig.conf, runs the MIG service,
+and walks you through assigning MIG devices to your TrueNAS apps.
 EOF
 else
     echo "=== Install completed with errors — see FAIL lines above ==="

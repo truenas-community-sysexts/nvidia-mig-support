@@ -485,7 +485,11 @@ if $BUNDLE_MIG; then
     cp "$REPO_ROOT/sysext/usr/lib/systemd/system/nvidia-mig-setup.service" \
        "$STAGING_DIR/usr/lib/systemd/system/nvidia-mig-setup.service"
     chmod 0644 "$STAGING_DIR/usr/lib/systemd/system/nvidia-mig-setup.service"
-    ok "MIG script + service bundled (PREINIT activation handled by install.sh)"
+    # Bundle the user-facing config helper at /usr/bin/configure-mig so
+    # it's available locally once the sysext is merged — no network needed.
+    cp "$REPO_ROOT/scripts/configure-mig.sh" "$STAGING_DIR/usr/bin/configure-mig"
+    chmod 0755 "$STAGING_DIR/usr/bin/configure-mig"
+    ok "MIG script + service + configure-mig bundled (PREINIT activation handled by install.sh)"
 else
     info "Skipping MIG bundle (--no-mig-bundle)"
 fi
