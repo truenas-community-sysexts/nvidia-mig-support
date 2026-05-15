@@ -282,6 +282,22 @@ echo "MIG devices created: ${#MIG_UUIDS[@]}"
 
 IFS=',' read -ra PROFILE_ARRAY <<< "$MIG_PROFILES"
 
+# Sanity check: profile list and MIG instance count must match exactly.
+# Otherwise the service didn't re-run with the new mig.conf (e.g. start
+# vs. restart bug), or someone hand-modified instances outside the
+# service. Either way, the assignment labels will be wrong — bail out.
+if [ "${#PROFILE_ARRAY[@]}" -ne "${#MIG_UUIDS[@]}" ]; then
+    echo "" >&2
+    echo "ERROR: profile list has ${#PROFILE_ARRAY[@]} entries (${MIG_PROFILES})" >&2
+    echo "       but the GPU has ${#MIG_UUIDS[@]} MIG instance(s) right now." >&2
+    echo "       Counts must match. Likely causes:" >&2
+    echo "         - nvidia-mig-setup.service didn't re-run with the new mig.conf" >&2
+    echo "         - MIG instances were created/destroyed outside the service" >&2
+    echo "       Inspect: journalctl -u nvidia-mig-setup.service -n 80 --no-pager" >&2
+    echo "       Recover: sudo systemctl restart nvidia-mig-setup.service" >&2
+    exit 1
+fi
+
 if $SKIP_APP_MAPPING || [ "${APP_COUNT:-0}" -eq 0 ]; then
     echo ""
     echo "=== MIG Devices ==="
