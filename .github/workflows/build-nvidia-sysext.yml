@@ -4,21 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       nvidia_version:
-        description: 'NVIDIA driver version (e.g. 570.172.08, 580.126.18, 590.44.01)'
-        required: true
-        default: '580.126.18'
+        description: 'NVIDIA driver version (leave blank for latest tracked)'
+        required: false
+        default: ''
       truenas_version:
-        description: 'TrueNAS version (e.g. 25.10.3.1)'
-        required: true
-        default: '25.10.3.1'
+        description: 'TrueNAS version (leave blank for latest tracked)'
+        required: false
+        default: ''
       kernel_module_type:
-        description: 'NVIDIA kernel module flavor'
-        required: true
-        type: choice
-        options: [open, proprietary]
-        default: 'open'
-      truenas_codename:
-        description: 'TrueNAS codename (auto-detected for 25.x; leave empty for 26.x)'
+        description: 'NVIDIA kernel module flavor: open or proprietary (leave blank for latest tracked)'
+        required: false
+        default: ''
+      train_name:
+        description: 'TrueNAS train / codename (leave blank for latest tracked)'
         required: false
         default: ''
       bundle_mig:
@@ -38,61 +36,94 @@ on:
       - 'scripts/configure-mig.sh'
       - 'sysext/**'
       - '.github/workflows/build-nvidia-sysext.yml'
+      - '.github/tracked-versions.json'
 
 permissions:
   contents: write
 
-# Defaults used by push-triggered builds (no inputs available there).
-# The same values are also the workflow_dispatch defaults above, so the
-# two paths produce identical artifacts for the "rolling dev" case.
-env:
-  DEFAULT_NVIDIA_VERSION: '580.126.18'
-  DEFAULT_TRUENAS_VERSION: '25.10.3.1'
-  DEFAULT_KERNEL_MODULE_TYPE: 'open'
-  DEFAULT_BUNDLE_MIG: 'true'
-  DEFAULT_DEV_RELEASE_TAG: 'dev-nvidia-sysext'
-
 jobs:
-  build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      nvidia_version: ${{ steps.params.outputs.nvidia_version }}
+      truenas_version: ${{ steps.params.outputs.truenas_version }}
+      kernel_module_type: ${{ steps.params.outputs.kernel_module_type }}
+      train_name: ${{ steps.params.outputs.train_name }}
+      bundle_mig: ${{ steps.params.outputs.bundle_mig }}
+      release_tag: ${{ steps.params.outputs.release_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            .github/tracked-versions.json
+          sparse-checkout-cone-mode: false
 
       - name: Resolve build parameters
         id: params
+        env:
+          INPUT_NVIDIA_VERSION: ${{ inputs.nvidia_version }}
+          INPUT_TRUENAS_VERSION: ${{ inputs.truenas_version }}
+          INPUT_KERNEL_MODULE_TYPE: ${{ inputs.kernel_module_type }}
+          INPUT_TRAIN_NAME: ${{ inputs.train_name }}
+          INPUT_BUNDLE_MIG: ${{ inputs.bundle_mig }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          NVIDIA_VERSION='${{ inputs.nvidia_version }}'
-          TRUENAS_VERSION='${{ inputs.truenas_version }}'
-          KERNEL_MODULE_TYPE='${{ inputs.kernel_module_type }}'
-          TRUENAS_CODENAME='${{ inputs.truenas_codename }}'
-          BUNDLE_MIG='${{ inputs.bundle_mig }}'
-          RELEASE_TAG='${{ inputs.release_tag }}'
+          set -euo pipefail
 
-          # On push, inputs.* are empty — fall back to defaults and
-          # publish to the rolling dev prerelease automatically.
-          if [ -z "$NVIDIA_VERSION" ];      then NVIDIA_VERSION="$DEFAULT_NVIDIA_VERSION"; fi
-          if [ -z "$TRUENAS_VERSION" ];     then TRUENAS_VERSION="$DEFAULT_TRUENAS_VERSION"; fi
-          if [ -z "$KERNEL_MODULE_TYPE" ];  then KERNEL_MODULE_TYPE="$DEFAULT_KERNEL_MODULE_TYPE"; fi
-          if [ -z "$BUNDLE_MIG" ];          then BUNDLE_MIG="$DEFAULT_BUNDLE_MIG"; fi
-          if [ -z "$RELEASE_TAG" ] && [ "${{ github.event_name }}" = "push" ]; then
-            RELEASE_TAG="$DEFAULT_DEV_RELEASE_TAG"
+          TRACKED=$(python3 -c "
+          import json
+          with open('.github/tracked-versions.json') as f:
+              d = json.load(f)
+          print(d['truenas']['version'])
+          print(d['truenas']['train'])
+          print(d['nvidia']['driver'])
+          print(d['nvidia']['kernel_module_type'])
+          ")
+          TRACKED_TRUENAS=$(sed -n '1p' <<< "$TRACKED")
+          TRACKED_TRAIN=$(sed -n '2p' <<< "$TRACKED")
+          TRACKED_NVIDIA=$(sed -n '3p' <<< "$TRACKED")
+          TRACKED_KMOD=$(sed -n '4p' <<< "$TRACKED")
+
+          NVIDIA_VERSION="${INPUT_NVIDIA_VERSION:-$TRACKED_NVIDIA}"
+          TRUENAS_VERSION="${INPUT_TRUENAS_VERSION:-$TRACKED_TRUENAS}"
+          KERNEL_MODULE_TYPE="${INPUT_KERNEL_MODULE_TYPE:-$TRACKED_KMOD}"
+          TRAIN_NAME="${INPUT_TRAIN_NAME:-$TRACKED_TRAIN}"
+          BUNDLE_MIG="${INPUT_BUNDLE_MIG:-true}"
+          RELEASE_TAG="$INPUT_RELEASE_TAG"
+
+          # Push-triggered builds publish to the rolling dev prerelease.
+          if [ -z "$RELEASE_TAG" ] && [ "$EVENT_NAME" = "push" ]; then
+            RELEASE_TAG="dev-nvidia-sysext"
           fi
 
           {
-            echo "nvidia_version=$NVIDIA_VERSION"
-            echo "truenas_version=$TRUENAS_VERSION"
-            echo "kernel_module_type=$KERNEL_MODULE_TYPE"
-            echo "truenas_codename=$TRUENAS_CODENAME"
-            echo "bundle_mig=$BUNDLE_MIG"
-            echo "release_tag=$RELEASE_TAG"
+            echo "nvidia_version=${NVIDIA_VERSION}"
+            echo "truenas_version=${TRUENAS_VERSION}"
+            echo "kernel_module_type=${KERNEL_MODULE_TYPE}"
+            echo "train_name=${TRAIN_NAME}"
+            echo "bundle_mig=${BUNDLE_MIG}"
+            echo "release_tag=${RELEASE_TAG}"
           } >> "$GITHUB_OUTPUT"
 
           echo "Resolved build parameters:"
-          echo "  NVIDIA:    $NVIDIA_VERSION ($KERNEL_MODULE_TYPE)"
-          echo "  TrueNAS:   $TRUENAS_VERSION ${TRUENAS_CODENAME:+($TRUENAS_CODENAME)}"
-          echo "  Bundle MIG: $BUNDLE_MIG"
-          echo "  Release:   ${RELEASE_TAG:-<none>}"
+          echo "  NVIDIA:     ${NVIDIA_VERSION} (${KERNEL_MODULE_TYPE})"
+          echo "  TrueNAS:    ${TRUENAS_VERSION} (${TRAIN_NAME})"
+          echo "  Bundle MIG: ${BUNDLE_MIG}"
+          echo "  Release:    ${RELEASE_TAG:-<none>}"
+
+  build:
+    needs: resolve
+    # Hardcoded ubuntu-24.04 (not dynamically resolved like hailo) — see
+    # docs/build-ci-notes.md for the reasoning. Short version: nvidia
+    # doesn't have hailo's runner-GLIBC-vs-target-GLIBC constraint, but
+    # does require modern gcc (gcc-14 for -fmin-function-alignment=16)
+    # which ubuntu-22.04 doesn't ship by default.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
 
       - name: Show runner capacity
         run: |
@@ -109,21 +140,46 @@ jobs:
             bison flex libelf-dev bc rsync libssl-dev pkg-config \
             pciutils gnupg ca-certificates wget curl
 
+      # ── TrueNAS .update file cache ──
+      # The .update is 1–3 GB; caching it on a per-version key makes
+      # repeated builds of the same TrueNAS version skip the download.
+      # The build script honors `--update-file=` to load a pre-staged
+      # file from this path; see scripts/build-nvidia-sysext.sh.
+      - name: Restore cached TrueNAS .update
+        id: update-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: /tmp/truenas.update
+          key: truenas-update-${{ needs.resolve.outputs.truenas_version }}
+
+      - name: Save TrueNAS .update to cache
+        # Only on cache miss. If the build fails after the .update download,
+        # we skip saving — the cost is one re-download on the next run, which
+        # is acceptable. (Matches hailo's pattern.)
+        if: steps.update-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: /tmp/truenas.update
+          key: truenas-update-${{ needs.resolve.outputs.truenas_version }}
+
       - name: Build nvidia.raw
         env:
-          NVIDIA_VERSION: ${{ steps.params.outputs.nvidia_version }}
-          TRUENAS_VERSION: ${{ steps.params.outputs.truenas_version }}
-          NVIDIA_KERNEL_MODULE_TYPE: ${{ steps.params.outputs.kernel_module_type }}
-          TRUENAS_CODENAME: ${{ steps.params.outputs.truenas_codename }}
-          BUNDLE_MIG: ${{ steps.params.outputs.bundle_mig }}
+          NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+          NVIDIA_KERNEL_MODULE_TYPE: ${{ needs.resolve.outputs.kernel_module_type }}
+          TRAIN_NAME: ${{ needs.resolve.outputs.train_name }}
+          BUNDLE_MIG: ${{ needs.resolve.outputs.bundle_mig }}
         run: |
           ARGS=(
             --nvidia-version="$NVIDIA_VERSION"
             --truenas-version="$TRUENAS_VERSION"
             --kernel-module-type="$NVIDIA_KERNEL_MODULE_TYPE"
+            --truenas-codename="$TRAIN_NAME"
             --out=dist
           )
-          [ -n "$TRUENAS_CODENAME" ] && ARGS+=(--truenas-codename="$TRUENAS_CODENAME")
+          if [ -f /tmp/truenas.update ]; then
+            ARGS+=(--update-file=/tmp/truenas.update)
+          fi
           if [ "$BUNDLE_MIG" = "false" ]; then ARGS+=(--no-mig-bundle); fi
           sudo -E scripts/build-nvidia-sysext.sh "${ARGS[@]}"
 
@@ -134,9 +190,9 @@ jobs:
           echo "SHA256: $(cat dist/nvidia.raw.sha256)"
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: nvidia-sysext-${{ steps.params.outputs.nvidia_version }}-truenas-${{ steps.params.outputs.truenas_version }}
+          name: nvidia-sysext-${{ needs.resolve.outputs.nvidia_version }}-truenas-${{ needs.resolve.outputs.truenas_version }}
           path: |
             dist/nvidia.raw
             dist/nvidia.raw.sha256
@@ -144,14 +200,14 @@ jobs:
           retention-days: 30
 
       - name: Attach to release
-        if: steps.params.outputs.release_tag != ''
+        if: needs.resolve.outputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.params.outputs.release_tag }}
-          NVIDIA_VERSION: ${{ steps.params.outputs.nvidia_version }}
-          KERNEL_MODULE_TYPE: ${{ steps.params.outputs.kernel_module_type }}
-          TRUENAS_VERSION: ${{ steps.params.outputs.truenas_version }}
-          BUNDLE_MIG: ${{ steps.params.outputs.bundle_mig }}
+          TAG: ${{ needs.resolve.outputs.release_tag }}
+          NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
+          KERNEL_MODULE_TYPE: ${{ needs.resolve.outputs.kernel_module_type }}
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+          BUNDLE_MIG: ${{ needs.resolve.outputs.bundle_mig }}
         run: |
           NOTES="Full-driver nvidia.raw sysext.
           Driver:  ${NVIDIA_VERSION} (${KERNEL_MODULE_TYPE})
