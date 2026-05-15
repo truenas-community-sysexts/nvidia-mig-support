@@ -186,9 +186,13 @@ resolve_persist_dir() {
         done
     fi
 
-    if [ ! -e /dev/tty ]; then
+    # /dev/tty the device node almost always exists; the real question is
+    # whether THIS process can open it. CI runners and daemons can't.
+    # `: < /dev/tty` forces an open() call and fails fast if no controlling
+    # terminal is attached.
+    if ! { : </dev/tty; } 2>/dev/null; then
         echo "ERROR: $header" >&2
-        echo "       No /dev/tty available for prompt. Pass --pool=NAME or --persist-path=PATH." >&2
+        echo "       No controlling terminal for prompt. Pass --pool=NAME or --persist-path=PATH." >&2
         return 1
     fi
 
