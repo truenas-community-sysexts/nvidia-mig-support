@@ -46,7 +46,7 @@ echo "=== Uninstall full-driver nvidia.raw ==="
 echo "Stopping Docker..."
 midclt call docker.update '{"nvidia": false}' >/dev/null || true
 if [ -x /usr/bin/nvidia-smi ]; then
-    for attempt in $(seq 1 24); do
+    for _ in $(seq 1 24); do
         N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
         [ "${N:-0}" -eq 0 ] && break
         sleep 5
