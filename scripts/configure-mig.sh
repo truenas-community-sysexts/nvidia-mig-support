@@ -443,28 +443,45 @@ case "$confirm" in
     [nN]*) echo "Discarded."; exit 0 ;;
 esac
 
-# --- Apply via midclt + redeploy each ---
-APPLIED=()
+# --- Apply via midclt: stop → update → start, per app ---
+# Stop before update because app.update implicitly runs `compose up
+# --force-recreate`. Against an already-running container that can fail
+# with a "container name already in use" conflict, after which middleware
+# silently rolls back the config change (app.get_instance then returns
+# gpus: null even though the job reported SUCCESS). See agents.md.
+# Use `midclt call -j` so the call waits for the underlying job and
+# propagates its exit status. Capture stderr (instead of >/dev/null'ing
+# it) so a real failure surfaces to the user.
 for i in "${!STAGED_APP[@]}"; do
-    printf "  Assigning device %s to %s..." "${STAGED_DEV[$i]}" "${STAGED_APP[$i]}"
-    if midclt call app.update "${STAGED_APP[$i]}" \
-        "{\"values\":{\"resources\":{\"gpus\":{\"use_all_gpus\":false,\"nvidia_gpu_selection\":{\"$PCI_SLOT\":{\"use_gpu\":true,\"uuid\":\"${STAGED_UUID[$i]}\"}}}}}}" \
-        >/dev/null 2>&1; then
+    app="${STAGED_APP[$i]}"
+    echo "  ${app} <-- device ${STAGED_DEV[$i]} (${STAGED_DTYPE[$i]})"
+
+    printf "    Stopping..."
+    if err=$(midclt call -j app.stop "$app" 2>&1); then
         echo " OK"
-        APPLIED+=("${STAGED_APP[$i]}")
     else
-        echo " WARNING: app.update failed"
+        echo " WARN (continuing): $err"
+    fi
+
+    printf "    Applying GPU config..."
+    payload="{\"values\":{\"resources\":{\"gpus\":{\"use_all_gpus\":false,\"nvidia_gpu_selection\":{\"$PCI_SLOT\":{\"use_gpu\":true,\"uuid\":\"${STAGED_UUID[$i]}\"}}}}}}"
+    if err=$(midclt call -j app.update "$app" "$payload" 2>&1); then
+        echo " OK"
+    else
+        echo " FAILED:"
+        echo "$err" | sed 's/^/      /'
+        # Try to restart so we don't leave the app stopped after a failure
+        midclt call -j app.start "$app" >/dev/null 2>&1 || true
+        continue
+    fi
+
+    printf "    Starting..."
+    if err=$(midclt call -j app.start "$app" 2>&1); then
+        echo " OK"
+    else
+        echo " WARN: $err"
     fi
 done
-
-if [ "${#APPLIED[@]}" -gt 0 ]; then
-    echo ""
-    echo "Restarting assigned apps so they pick up the new GPU config..."
-    for n in "${APPLIED[@]}"; do
-        printf "  Restarting %s..." "$n"
-        midclt call app.redeploy "$n" >/dev/null 2>&1 && echo " OK" || echo " WARN: redeploy failed"
-    done
-fi
 
 echo ""
 echo "=== Done ==="

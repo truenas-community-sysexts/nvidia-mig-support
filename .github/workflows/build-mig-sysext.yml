@@ -9,6 +9,7 @@ on:
         default: ''
   push:
     branches:
+      - main
       - refactor/dual-sysext
     paths:
       - 'sysext/**'
@@ -68,14 +69,15 @@ jobs:
             dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
             --clobber
 
-      - name: Publish/refresh dev prerelease (push to refactor branch)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/refactor/dual-sysext'
+      - name: Publish/refresh dev prerelease (push to main or refactor branch)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/refactor/dual-sysext')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="dev-mig-sysext"
-          NOTES="Rolling dev build of the lightweight nvidia-mig sysext from the refactor/dual-sysext branch. Updated on every push. Do not depend on this tag for production — it is force-moved.
+          NOTES="Rolling dev build of the lightweight nvidia-mig sysext. Updated on every push to main (or the refactor branch). Do not depend on this tag for production — it is force-moved.
 
+          Source branch: ${{ github.ref_name }}
           Latest commit: ${{ github.sha }}
           Built: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 

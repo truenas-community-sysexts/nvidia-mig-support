@@ -99,6 +99,25 @@ echo ""
 cp "$SYSEXT_SRC" "${PERSIST_DIR}/nvidia.raw"
 echo "Copied custom nvidia.raw to ${PERSIST_DIR}/nvidia.raw"
 
+# --- Stage PREINIT helper BEFORE any system mutations ---
+# If the download fails (e.g. transient network issue), we want it to fail
+# NOW — not after Docker is stopped and nvidia.raw has been swapped, which
+# would leave the box half-installed. Fetched from main (durable), not the
+# refactor branch (deleted post-merge).
+SCRIPT_URL_BASE="https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/main/scripts"
+PREINIT_LOCAL="${PERSIST_DIR}/nvidia-preinit-full.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
+if [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/nvidia-preinit-full.sh" ]; then
+    cp "${SCRIPT_DIR}/nvidia-preinit-full.sh" "$PREINIT_LOCAL"
+    echo "Staged PREINIT helper from local checkout"
+else
+    echo "Downloading PREINIT helper from ${SCRIPT_URL_BASE}/nvidia-preinit-full.sh"
+    curl -fL --retry 3 -o "$PREINIT_LOCAL" "${SCRIPT_URL_BASE}/nvidia-preinit-full.sh" \
+        || { echo "ERROR: failed to download PREINIT helper — aborting BEFORE system changes" >&2; exit 1; }
+fi
+chmod 0755 "$PREINIT_LOCAL"
+echo "Staged: $PREINIT_LOCAL"
+
 # --- Stop Docker so the GPU is free, wait for processes to drain ---
 echo ""
 echo "Stopping Docker (releasing GPU)..."
@@ -145,22 +164,9 @@ echo "Re-merging sysext..."
 systemd-sysext merge
 systemctl daemon-reload
 
-# --- Install the PREINIT script + register with midclt ---
+# --- Register the (already-staged) PREINIT helper with midclt ---
 echo ""
-echo "Installing PREINIT script..."
-SCRIPT_URL_BASE="https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/refactor/dual-sysext/scripts"
-PREINIT_LOCAL="${PERSIST_DIR}/nvidia-preinit-full.sh"
-
-# Prefer in-repo copy if running from a checkout; fall back to download
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
-if [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/nvidia-preinit-full.sh" ]; then
-    cp "${SCRIPT_DIR}/nvidia-preinit-full.sh" "$PREINIT_LOCAL"
-else
-    curl -fL -o "$PREINIT_LOCAL" "${SCRIPT_URL_BASE}/nvidia-preinit-full.sh"
-fi
-chmod 0755 "$PREINIT_LOCAL"
-echo "Installed: $PREINIT_LOCAL"
-
+echo "Registering PREINIT entry..."
 PREINIT_CMD="$PREINIT_LOCAL"
 COMMENT="Full-driver nvidia.raw restore + start MIG service"
 
