@@ -26,7 +26,7 @@ Server Edition cards and previous-gen workstation cards (e.g. RTX A6000) don't n
 
 ## High-level
 
-```
+```text
                 ┌─────────────────────────────────────────────────────────┐
                 │                  TrueNAS host                            │
                 │                                                          │
@@ -56,7 +56,7 @@ The GPU sees one merged userspace via `systemd-sysext`. Multiple `.raw` extensio
 
 Adds MIG tooling on top of TrueNAS's stock NVIDIA driver. The stock `nvidia.raw` is untouched.
 
-```
+```text
        nvidia.raw (stock, 570.172.08 on 25.10.x)
             +
        hailo.raw (untouched)
@@ -75,7 +75,7 @@ Built locally in <1 s via `mksquashfs`. Auto-published to the `dev-mig-sysext` r
 
 Replaces the stock `nvidia.raw` with one containing a different driver version (e.g. 580.126.18 or 590.44.01), plus bundled MIG tooling so the sysext is self-sufficient.
 
-```
+```text
        nvidia.raw (custom, ~470 MB)
             │
             ├─ NVIDIA driver (libs, .ko modules, nvidia-smi, …)
@@ -106,7 +106,7 @@ The MIG setup service does NOT use `[Install] WantedBy=multi-user.target`. On Tr
 
 The working pattern is TrueNAS's middleware-driven PREINIT mechanism:
 
-```
+```text
                   TrueNAS boot
                        │
                        ▼
