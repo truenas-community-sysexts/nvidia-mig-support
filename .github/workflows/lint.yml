@@ -7,11 +7,13 @@ on:
       - 'scripts/**.sh'
       - '.github/scripts/**.sh'
       - '.github/workflows/**.yml'
+      - '.github/tracked-versions.json'
   pull_request:
     paths:
       - 'scripts/**.sh'
       - '.github/scripts/**.sh'
       - '.github/workflows/**.yml'
+      - '.github/tracked-versions.json'
   workflow_dispatch:
 
 permissions:
@@ -34,7 +36,15 @@ jobs:
             scripts/uninstall-mig-sysext.sh \
             scripts/configure-mig.sh \
             scripts/recover-stock-nvidia.sh \
-            scripts/nvidia-preinit-full.sh
+            scripts/nvidia-preinit-full.sh \
+            .github/scripts/*.sh
+
+  tracked-versions:
+    name: tracked-versions.json shape
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: .github/scripts/validate-tracked-versions.sh
 
   actionlint:
     name: actionlint workflows

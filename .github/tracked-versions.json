@@ -1,0 +1,10 @@
+{
+  "truenas": {
+    "version": "25.10.3.1",
+    "train": "Goldeye"
+  },
+  "nvidia": {
+    "driver": "580.126.18",
+    "kernel_module_type": "open"
+  }
+}
