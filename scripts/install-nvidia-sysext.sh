@@ -209,4 +209,12 @@ After reboot:
   - if you have mig.conf in $PERSIST_DIR, MIG instances are recreated
 
 Run: sudo reboot
+
+Then, to configure MIG profiles and map MIG devices to TrueNAS apps:
+
+  curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/refactor/dual-sysext/scripts/configure-mig.sh \\
+    | sudo bash -s -- --mig-profiles=14,14,14,14
+
+(or run without --mig-profiles for an interactive prompt; also walks you
+through MIG-device→app assignment).
 EOF

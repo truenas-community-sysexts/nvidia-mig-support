@@ -196,10 +196,17 @@ fi
 
 echo ""
 if $OK; then
-    echo "=== Install complete ==="
-    echo "Next: configure MIG profiles by writing ${PERSIST_DIR}/mig.conf and"
-    echo "running 'systemctl start nvidia-mig-setup.service', or wait for the"
-    echo "full install.sh rewrite (Phase 3) to handle that automatically."
+    cat <<EOF
+=== Install complete ===
+
+Next: configure MIG profiles and map MIG devices to TrueNAS apps:
+
+  curl -fsSL https://raw.githubusercontent.com/scyto/truenas-nvidia-rtx6000-pro-mig/refactor/dual-sysext/scripts/configure-mig.sh \\
+    | sudo bash -s -- --mig-profiles=14,14,14,14
+
+(or run without --mig-profiles for an interactive prompt; the script also
+walks you through MIG-device→app assignment).
+EOF
 else
     echo "=== Install completed with errors — see FAIL lines above ==="
     exit 1
