@@ -69,20 +69,27 @@ if [ -z "$MIG_PROFILES" ]; then
     if [ -f "$PERSIST_DIR/mig.conf" ]; then
         EXISTING=$(grep -E '^MIG_PROFILES=' "$PERSIST_DIR/mig.conf" | sed -E 's/^MIG_PROFILES=//; s/^"//; s/"$//')
     fi
-    cat <<EOF
+    cat <<'EOF'
 
 === MIG profile selection ===
 
-Common profile IDs (RTX PRO 6000 Blackwell, 96 GB total):
-  14  1g.24gb         compute only        (smallest, 4 fit in one GPU)
-  47  1g.24gb+gfx     compute + graphics
-   5  2g.48gb         compute only        (2 fit)
-  35  2g.48gb+gfx     compute + graphics
-   0  4g.96gb         compute only        (1, uses whole GPU)
-  32  4g.96gb+gfx     compute + graphics
+Profile IDs (RTX PRO 6000 Blackwell, 96 GB total, 4 slices):
 
-Enter a comma-separated list (e.g. 14,14,14,14 for four 1g.24gb slices).
-See docs/mig-profiles.md for the full list and slice budgeting rules.
+  ID  Profile           Notes
+  14  1g.24gb           compute + media       (4 fit)   ← most common
+   5  2g.48gb           compute + media       (2 fit)
+   0  4g.96gb           compute + media       (whole GPU)
+  47  1g.24gb+gfx       adds graphics APIs    (4 fit)
+  35  2g.48gb+gfx       adds graphics APIs    (2 fit)
+  32  4g.96gb+gfx       adds graphics APIs    (whole GPU)
+  21  1g.24gb+me        adds OFA engine       (1 inst max)
+  65  1g.24gb+me.all    grabs all media engs  (1 inst max)
+  64  2g.48gb+me.all    grabs all media engs  (1 inst max — known foot-gun, see agents.md)
+  67  1g.24gb-me        pure compute, no media (4 fit)
+  66  2g.48gb-me        pure compute, no media (2 fit)
+
+Enter a comma-separated list, e.g. 14,14,14,14 for four 1g.24gb slices.
+See docs/mig-profiles.md for the full table + slice budgeting rules.
 
 EOF
     if [ -n "$EXISTING" ]; then
