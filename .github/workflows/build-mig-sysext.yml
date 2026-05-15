@@ -11,15 +11,27 @@ on:
         description: 'TrueNAS train / codename (leave blank for latest tracked)'
         required: false
         default: ''
-  push:
-    branches:
-      - main
-    paths:
-      - 'sysext/**'
-      - 'scripts/build-mig-sysext.sh'
-      - 'scripts/configure-mig.sh'
-      - '.github/workflows/build-mig-sysext.yml'
-      - '.github/tracked-versions.json'
+      mark_latest:
+        description: 'Promote this release to GitHub "Latest" (defaults to true for manual dispatches)'
+        required: false
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+
+  workflow_call:
+    inputs:
+      truenas_version:
+        type: string
+        required: true
+      train_name:
+        type: string
+        required: true
+      mark_latest:
+        type: string
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -31,7 +43,7 @@ jobs:
       truenas_version: ${{ steps.params.outputs.truenas_version }}
       train_name: ${{ steps.params.outputs.train_name }}
       release_tag: ${{ steps.params.outputs.release_tag }}
-      is_prerelease: ${{ steps.params.outputs.is_prerelease }}
+      mark_latest: ${{ steps.params.outputs.mark_latest }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -45,7 +57,7 @@ jobs:
         env:
           INPUT_TRUENAS_VERSION: ${{ inputs.truenas_version }}
           INPUT_TRAIN_NAME: ${{ inputs.train_name }}
-          EVENT_NAME: ${{ github.event_name }}
+          INPUT_MARK_LATEST: ${{ inputs.mark_latest }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
@@ -63,29 +75,25 @@ jobs:
           TRUENAS_VERSION="${INPUT_TRUENAS_VERSION:-$TRACKED_TRUENAS}"
           TRAIN_NAME="${INPUT_TRAIN_NAME:-$TRACKED_TRAIN}"
 
-          # Tag policy (mirrors build-nvidia-sysext.yml):
-          # - push to main      → dev-mig-sysext (rolling, mutable, prerelease)
-          # - workflow_dispatch → v<truenas>-mig-r<run> (immutable, prerelease until promoted)
-          # MIG sysext content is TrueNAS-version-independent, but the tag includes
-          # TrueNAS for consumer context (which release pairs with which TrueNAS).
-          if [ "$EVENT_NAME" = "push" ]; then
-            RELEASE_TAG="dev-mig-sysext"
-            IS_PRERELEASE="true"
-          else
-            RELEASE_TAG="v${TRUENAS_VERSION}-mig-r${RUN_NUMBER}"
-            IS_PRERELEASE="true"
-          fi
+          # Tag policy: every build produces a unique immutable tag.
+          # Format: v<truenas>-mig-r<run_number>
+          # MIG sysext content is TrueNAS-version-independent, but the tag
+          # includes TrueNAS for consumer context (which release pairs with
+          # which TrueNAS).
+          RELEASE_TAG="v${TRUENAS_VERSION}-mig-r${RUN_NUMBER}"
+          MARK_LATEST="${INPUT_MARK_LATEST:-true}"
 
           {
             echo "truenas_version=${TRUENAS_VERSION}"
             echo "train_name=${TRAIN_NAME}"
             echo "release_tag=${RELEASE_TAG}"
-            echo "is_prerelease=${IS_PRERELEASE}"
+            echo "mark_latest=${MARK_LATEST}"
           } >> "$GITHUB_OUTPUT"
 
           echo "Resolved build parameters:"
-          echo "  TrueNAS:  ${TRUENAS_VERSION} (${TRAIN_NAME})"
-          echo "  Release:  ${RELEASE_TAG} (prerelease=${IS_PRERELEASE})"
+          echo "  TrueNAS:     ${TRUENAS_VERSION} (${TRAIN_NAME})"
+          echo "  Release tag: ${RELEASE_TAG}"
+          echo "  Mark latest: ${MARK_LATEST}"
 
   build:
     needs: resolve
@@ -114,30 +122,33 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish release
+      - name: Write release notes
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.resolve.outputs.release_tag }}
-          IS_PRERELEASE: ${{ needs.resolve.outputs.is_prerelease }}
           TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
           COMMIT_SHA: ${{ github.sha }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
-          NOTES="Lightweight MIG sysext. Pairs with TrueNAS stock nvidia.raw (driver >= 570).
+          cat > release-notes.md <<EOF
+          Lightweight MIG sysext. Pairs with TrueNAS stock nvidia.raw (driver >= 570).
 
-          TrueNAS:       ${TRUENAS_VERSION}
-          Run number:    ${RUN_NUMBER}
-          Source commit: ${COMMIT_SHA}"
+          - TrueNAS:       \`${TRUENAS_VERSION}\`
+          - Run number:    ${RUN_NUMBER}
+          - Source commit: \`${COMMIT_SHA}\`
 
-          PRERELEASE_FLAG=""
-          if [ "$IS_PRERELEASE" = "true" ]; then PRERELEASE_FLAG="--prerelease"; fi
+          Install: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash\`
+          EOF
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 --clobber
-            # shellcheck disable=SC2086 # PRERELEASE_FLAG is intentionally word-split
-            gh release edit "$TAG" --notes "$NOTES" --target "$COMMIT_SHA" $PRERELEASE_FLAG
-          else
-            # shellcheck disable=SC2086 # PRERELEASE_FLAG is intentionally word-split
-            gh release create "$TAG" dist/nvidia-mig.raw dist/nvidia-mig.raw.sha256 \
-              --title "$TAG" --notes "$NOTES" --target "$COMMIT_SHA" $PRERELEASE_FLAG
-          fi
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.resolve.outputs.release_tag }}
+          name: "TrueNAS ${{ needs.resolve.outputs.truenas_version }} - MIG sysext (r${{ github.run_number }})"
+          body_path: release-notes.md
+          files: |
+            dist/nvidia-mig.raw
+            dist/nvidia-mig.raw.sha256
+          draft: false
+          prerelease: false
+          make_latest: ${{ needs.resolve.outputs.mark_latest }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

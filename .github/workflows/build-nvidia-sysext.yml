@@ -24,15 +24,37 @@ on:
         required: true
         type: boolean
         default: true
-  push:
-    branches:
-      - main
-    paths:
-      - 'scripts/build-nvidia-sysext.sh'
-      - 'scripts/configure-mig.sh'
-      - 'sysext/**'
-      - '.github/workflows/build-nvidia-sysext.yml'
-      - '.github/tracked-versions.json'
+      mark_latest:
+        description: 'Promote this release to GitHub "Latest" (defaults to true for manual dispatches; Phase 4 check-releases will pass false for auto-builds)'
+        required: false
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+
+  workflow_call:
+    inputs:
+      nvidia_version:
+        type: string
+        required: true
+      truenas_version:
+        type: string
+        required: true
+      kernel_module_type:
+        type: string
+        required: true
+      train_name:
+        type: string
+        required: true
+      bundle_mig:
+        type: boolean
+        required: false
+        default: true
+      mark_latest:
+        type: string
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -47,7 +69,7 @@ jobs:
       train_name: ${{ steps.params.outputs.train_name }}
       bundle_mig: ${{ steps.params.outputs.bundle_mig }}
       release_tag: ${{ steps.params.outputs.release_tag }}
-      is_prerelease: ${{ steps.params.outputs.is_prerelease }}
+      mark_latest: ${{ steps.params.outputs.mark_latest }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -64,7 +86,7 @@ jobs:
           INPUT_KERNEL_MODULE_TYPE: ${{ inputs.kernel_module_type }}
           INPUT_TRAIN_NAME: ${{ inputs.train_name }}
           INPUT_BUNDLE_MIG: ${{ inputs.bundle_mig }}
-          EVENT_NAME: ${{ github.event_name }}
+          INPUT_MARK_LATEST: ${{ inputs.mark_latest }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
@@ -89,18 +111,15 @@ jobs:
           TRAIN_NAME="${INPUT_TRAIN_NAME:-$TRACKED_TRAIN}"
           BUNDLE_MIG="${INPUT_BUNDLE_MIG:-true}"
 
-          # Tag policy:
-          # - push to main         → dev-nvidia-sysext (rolling, mutable, prerelease)
-          # - workflow_dispatch    → v<truenas>-nvidia<driver>-r<run> (immutable, prerelease until
-          #                          manually promoted to Latest)
-          # See docs/build-ci-notes.md for the full reasoning.
-          if [ "$EVENT_NAME" = "push" ]; then
-            RELEASE_TAG="dev-nvidia-sysext"
-            IS_PRERELEASE="true"
-          else
-            RELEASE_TAG="v${TRUENAS_VERSION}-nvidia${NVIDIA_VERSION}-r${RUN_NUMBER}"
-            IS_PRERELEASE="true"
-          fi
+          # Tag policy: every build produces a unique immutable tag.
+          # Format: v<truenas>-nvidia<driver>-r<run_number>
+          # run_number is monotonic per workflow, so retries on the same
+          # commit get unique tags — sidesteps GitHub's immutable-release
+          # tag-burn. mark_latest controls whether the release is promoted
+          # to GitHub "Latest"; defaults true for manual dispatches and
+          # false for Phase 4 auto-builds (set by workflow_call caller).
+          RELEASE_TAG="v${TRUENAS_VERSION}-nvidia${NVIDIA_VERSION}-r${RUN_NUMBER}"
+          MARK_LATEST="${INPUT_MARK_LATEST:-true}"
 
           {
             echo "nvidia_version=${NVIDIA_VERSION}"
@@ -109,14 +128,15 @@ jobs:
             echo "train_name=${TRAIN_NAME}"
             echo "bundle_mig=${BUNDLE_MIG}"
             echo "release_tag=${RELEASE_TAG}"
-            echo "is_prerelease=${IS_PRERELEASE}"
+            echo "mark_latest=${MARK_LATEST}"
           } >> "$GITHUB_OUTPUT"
 
           echo "Resolved build parameters:"
-          echo "  NVIDIA:     ${NVIDIA_VERSION} (${KERNEL_MODULE_TYPE})"
-          echo "  TrueNAS:    ${TRUENAS_VERSION} (${TRAIN_NAME})"
-          echo "  Bundle MIG: ${BUNDLE_MIG}"
-          echo "  Release:    ${RELEASE_TAG} (prerelease=${IS_PRERELEASE})"
+          echo "  NVIDIA:      ${NVIDIA_VERSION} (${KERNEL_MODULE_TYPE})"
+          echo "  TrueNAS:     ${TRUENAS_VERSION} (${TRAIN_NAME})"
+          echo "  Bundle MIG:  ${BUNDLE_MIG}"
+          echo "  Release tag: ${RELEASE_TAG}"
+          echo "  Mark latest: ${MARK_LATEST}"
 
   build:
     needs: resolve
@@ -206,11 +226,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish release
+      - name: Write release notes
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.resolve.outputs.release_tag }}
-          IS_PRERELEASE: ${{ needs.resolve.outputs.is_prerelease }}
           NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
           KERNEL_MODULE_TYPE: ${{ needs.resolve.outputs.kernel_module_type }}
           TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
@@ -218,28 +235,37 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
-          NOTES="Full-driver nvidia.raw sysext.
+          cat > release-notes.md <<EOF
+          Full-driver nvidia.raw sysext.
 
-          Driver:       ${NVIDIA_VERSION} (${KERNEL_MODULE_TYPE})
-          TrueNAS:      ${TRUENAS_VERSION}
-          MIG bundled:  ${BUNDLE_MIG}
-          Run number:   ${RUN_NUMBER}
-          Source commit: ${COMMIT_SHA}"
+          - Driver:        \`${NVIDIA_VERSION}\` (${KERNEL_MODULE_TYPE} module)
+          - TrueNAS:       \`${TRUENAS_VERSION}\`
+          - MIG bundled:   ${BUNDLE_MIG}
+          - Run number:    ${RUN_NUMBER}
+          - Source commit: \`${COMMIT_SHA}\`
 
-          PRERELEASE_FLAG=""
-          if [ "$IS_PRERELEASE" = "true" ]; then PRERELEASE_FLAG="--prerelease"; fi
+          Install: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-nvidia-sysext.sh | sudo bash\`
+          EOF
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            # Tag already exists. For dev-* this is expected (rolling). For
-            # immutable v…-r<run> tags it shouldn't happen — run_number is
-            # monotonic — but if it does (e.g. someone re-ran the same job),
-            # --clobber on assets and notes overwrite is the safer behavior
-            # than failing the workflow.
-            gh release upload "$TAG" dist/nvidia.raw dist/nvidia.raw.sha256 --clobber
-            # shellcheck disable=SC2086 # PRERELEASE_FLAG is intentionally word-split
-            gh release edit "$TAG" --notes "$NOTES" --target "$COMMIT_SHA" $PRERELEASE_FLAG
-          else
-            # shellcheck disable=SC2086 # PRERELEASE_FLAG is intentionally word-split
-            gh release create "$TAG" dist/nvidia.raw dist/nvidia.raw.sha256 \
-              --title "$TAG" --notes "$NOTES" --target "$COMMIT_SHA" $PRERELEASE_FLAG
-          fi
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          # -r<run> suffix: every invocation gets a unique tag so nothing
+          # collides with GitHub's immutable-release tag-burn behavior.
+          # github.run_number is monotonic per workflow, so it also covers
+          # the same-commit re-dispatch case (manual retry after a transient
+          # failure) where a SHA alone wouldn't change.
+          tag_name: ${{ needs.resolve.outputs.release_tag }}
+          name: "TrueNAS ${{ needs.resolve.outputs.truenas_version }} - NVIDIA ${{ needs.resolve.outputs.nvidia_version }} (r${{ github.run_number }})"
+          body_path: release-notes.md
+          files: |
+            dist/nvidia.raw
+            dist/nvidia.raw.sha256
+          draft: false
+          prerelease: false
+          # When mark_latest=false the release is created but not promoted
+          # to "Latest" — Phase 4's auto-build path will set this to false
+          # so unverified auto-builds don't displace a known-good Latest.
+          make_latest: ${{ needs.resolve.outputs.mark_latest }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
