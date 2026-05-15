@@ -221,6 +221,35 @@ validate_mig_profiles() {
         fi
     done
 
+    # Media-engine constraint: RTX PRO 6000 Blackwell has 4 NVDEC, 4 NVENC,
+    # 4 NVJPG, 1 OFA. The +me.all profiles (64, 65) grab ALL of them, so any
+    # other instance in the same config must be -me (66, 67) — otherwise
+    # that instance asks for media engines that have been taken.
+    local has_me_all=false
+    for p in "${arr[@]}"; do
+        case "$p" in 64|65) has_me_all=true ;; esac
+    done
+    if $has_me_all; then
+        for p in "${arr[@]}"; do
+            case "$p" in
+                64|65|66|67) ;;
+                *) echo "ERROR: profile $p cannot coexist with +me.all (64 or 65) — that variant grabs all media engines, so other instances must be -me (66 or 67)" >&2; ok=false ;;
+            esac
+        done
+    fi
+
+    # OFA is single — only one OFA engine on the GPU, claimed by profiles
+    # 21 (+me), 64 (+me.all), 65 (+me.all). At most one of those three can
+    # appear in a config.
+    local ofa_count=0
+    for p in "${arr[@]}"; do
+        case "$p" in 21|64|65) ofa_count=$((ofa_count + 1)) ;; esac
+    done
+    if [ "$ofa_count" -gt 1 ]; then
+        echo "ERROR: only 1 OFA engine on the GPU, but $ofa_count profiles in the list claim it (21/64/65). Pick one." >&2
+        ok=false
+    fi
+
     $ok
 }
 
