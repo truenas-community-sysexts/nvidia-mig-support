@@ -113,18 +113,20 @@ validate_mig_profiles() {
 }
 
 profile_label() {
+    # Engine counts straight from `nvidia-smi mig -lgip` on Blackwell.
+    # "1 dec/enc/jpg" = 1 NVDEC + 1 NVENC + 1 NVJPG per instance.
     case "$1" in
-        47) echo "gfx + compute (1g.24gb)" ;;
-        35) echo "gfx + compute (2g.48gb)" ;;
-        32) echo "gfx + compute (4g.96gb)" ;;
-        14) echo "compute only (1g.24gb)" ;;
-        5)  echo "compute only (2g.48gb)" ;;
-        0)  echo "compute only (4g.96gb)" ;;
-        64) echo "compute + all media engines (2g.48gb)" ;;
-        21) echo "compute + media + OFA (1g.24gb)" ;;
-        65) echo "compute + all media engines (1g.24gb)" ;;
-        67) echo "compute, no media (1g.24gb)" ;;
-        66) echo "compute, no media (2g.48gb)" ;;
+        14) echo "1g.24gb           — 1 dec/enc/jpg, no OFA" ;;
+        21) echo "1g.24gb+me        — 1 dec/enc/jpg + OFA" ;;
+        47) echo "1g.24gb+gfx       — 1 dec/enc/jpg, no OFA, +graphics" ;;
+        65) echo "1g.24gb+me.all    — ALL 4 dec/enc/jpg + OFA (claims them all)" ;;
+        67) echo "1g.24gb-me        — pure compute, no media, no OFA" ;;
+        5)  echo "2g.48gb           — 2 dec/enc/jpg, no OFA" ;;
+        35) echo "2g.48gb+gfx       — 2 dec/enc/jpg, no OFA, +graphics" ;;
+        64) echo "2g.48gb+me.all    — ALL 4 dec/enc/jpg + OFA (claims them all)" ;;
+        66) echo "2g.48gb-me        — pure compute, no media, no OFA" ;;
+        0)  echo "4g.96gb           — whole GPU: 4 dec/enc/jpg + OFA" ;;
+        32) echo "4g.96gb+gfx       — whole GPU: 4 dec/enc/jpg + OFA + graphics" ;;
         *)  echo "profile $1" ;;
     esac
 }
@@ -167,23 +169,26 @@ if [ -z "$MIG_PROFILES" ]; then
 
 === MIG profile selection ===
 
-Profile IDs (RTX PRO 6000 Blackwell, 96 GB total, 4 slices):
+Profile IDs (RTX PRO 6000 Blackwell, 96 GB total, 4 slices).
+GPU has 4 NVDEC, 4 NVENC, 4 NVJPG, 1 OFA total — distributed below.
 
-  ID  Profile           Notes
-  14  1g.24gb           compute + media       (4 fit)   ← most common
-   5  2g.48gb           compute + media       (2 fit)
-   0  4g.96gb           compute + media       (whole GPU)
-  47  1g.24gb+gfx       adds graphics APIs    (4 fit)
-  35  2g.48gb+gfx       adds graphics APIs    (2 fit)
-  32  4g.96gb+gfx       adds graphics APIs    (whole GPU)
-  21  1g.24gb+me        adds OFA engine       (1 inst max)
-  65  1g.24gb+me.all    grabs all media engs  (1 inst max)
-  64  2g.48gb+me.all    grabs all media engs  (1 inst max — known foot-gun, see agents.md)
-  67  1g.24gb-me        pure compute, no media (4 fit)
-  66  2g.48gb-me        pure compute, no media (2 fit)
+  ID  Profile           DEC ENC JPG OFA  GFX  Max instances
+  14  1g.24gb            1   1   1   -   no   4              ← most common
+  21  1g.24gb+me         1   1   1   1   no   1   (claims OFA)
+  47  1g.24gb+gfx        1   1   1   -   yes  4
+  65  1g.24gb+me.all     4   4   4   1   no   1   (claims ALL media + OFA)
+  67  1g.24gb-me         -   -   -   -   no   4
+   5  2g.48gb            2   2   2   -   no   2
+  35  2g.48gb+gfx        2   2   2   -   yes  2
+  64  2g.48gb+me.all     4   4   4   1   no   1   (claims ALL media + OFA)
+  66  2g.48gb-me         -   -   -   -   no   2
+   0  4g.96gb            4   4   4   1   no   1   (whole GPU)
+  32  4g.96gb+gfx        4   4   4   1   yes  1   (whole GPU)
+
+Slice budget: 1g = 1 slice, 2g = 2 slices, 4g = 4 slices. Total ≤ 4.
 
 Enter a comma-separated list, e.g. 14,14,14,14 for four 1g.24gb slices.
-See docs/mig-profiles.md for the full table + slice budgeting rules.
+See docs/mig-profiles.md for the full reference.
 
 EOF
     if [ -n "$EXISTING" ]; then
