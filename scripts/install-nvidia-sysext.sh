@@ -124,27 +124,55 @@ except Exception:
 
     local prefix="v${version}${TAG_PREFIX_SUFFIX}"
     local tag
-    tag=$(curl -sf --max-time 30 "https://api.github.com/repos/${REPO}/releases" 2>/dev/null \
+    # `?per_page=100`: GitHub defaults to 30 results, so once the repo
+    #   crosses 30 releases, installs for older TrueNAS versions would
+    #   silently fail to find a matching tag.
+    # `curl -sS` (not -sf): let curl surface transport errors AND let Python
+    #   see the API error body. The original `-sf` swallowed HTTP error
+    #   responses entirely, so rate-limit 403s presented as "no release
+    #   found" with no hint at the real cause.
+    # `PREFIX` via env (not `prefix = '${prefix}'`): a shell-interpolated
+    #   single quote inside `prefix` would close the Python literal and
+    #   inject arbitrary Python. Passing through the environment removes
+    #   that injection point entirely. Defense in depth: today `prefix`
+    #   is built from midclt + a hardcoded suffix, but future callers
+    #   could route user input through it.
+    # The error-path "Available releases" listing is folded into the same
+    # Python call to avoid a duplicate API request (matters on rate-limit
+    # failure modes).
+    export PREFIX="$prefix"
+    tag=$(curl -sS --max-time 30 "https://api.github.com/repos/${REPO}/releases?per_page=100" \
         | python3 -c "
-import sys, json
+import sys, json, os
 try:
-    releases = json.load(sys.stdin)
-    prefix = '${prefix}'
-    matches = [r for r in releases if r.get('tag_name', '').startswith(prefix)]
-    matches.sort(key=lambda r: r.get('published_at') or r.get('created_at') or '', reverse=True)
-    if matches:
-        print(matches[0]['tag_name'], end='')
-except Exception:
-    pass") || true
-
-    if [ -z "$tag" ]; then
-        echo "ERROR: no release found with tag prefix '${prefix}'" >&2
-        echo "       Available release tags:" >&2
-        curl -sf --max-time 30 "https://api.github.com/repos/${REPO}/releases" 2>/dev/null \
-            | python3 -c "import sys,json; [print(f'         {r[\"tag_name\"]}') for r in json.load(sys.stdin)]" >&2 || true
+    data = json.load(sys.stdin)
+except (json.JSONDecodeError, ValueError):
+    print('Failed to parse GitHub API response', file=sys.stderr)
+    sys.exit(1)
+if isinstance(data, dict) and 'message' in data:
+    msg = data['message']
+    if 'rate limit' in msg.lower():
+        print('GitHub API rate limit exceeded (60 requests/hour for unauthenticated calls).', file=sys.stderr)
+        print('Wait a few minutes and try again.', file=sys.stderr)
+    else:
+        print(f'GitHub API error: {msg}', file=sys.stderr)
+    sys.exit(1)
+prefix = os.environ['PREFIX']
+matches = [r for r in data if r.get('tag_name', '').startswith(prefix)]
+if not matches:
+    print(f\"No release found with tag prefix '{prefix}'\", file=sys.stderr)
+    tags = [r.get('tag_name', '?') for r in data]
+    if tags:
+        print('Available releases:', file=sys.stderr)
+        for t in tags:
+            print(f'  {t}', file=sys.stderr)
+    sys.exit(1)
+matches.sort(key=lambda r: r.get('published_at') or r.get('created_at') or '', reverse=True)
+print(matches[0]['tag_name'], end='')
+") || {
         echo "       If you need a specific build, pass --release=TAG explicitly." >&2
         exit 1
-    fi
+    }
     printf '%s\n' "$tag"
 }
 
