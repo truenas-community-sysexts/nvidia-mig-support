@@ -1,21 +1,52 @@
 #!/usr/bin/env bash
 # TrueNAS PREINIT for the full-driver sysext path.
 #
-# Two responsibilities, both must run before Docker starts:
-#   1. Survive TrueNAS updates — /usr gets replaced on update, which wipes
-#      our custom nvidia.raw and restores stock. Compare SHAs between
-#      live and persistent custom; if they differ, restore the custom.
-#   2. Start nvidia-mig-setup.service so MIG instances are recreated.
+# Three responsibilities, all must run before Docker starts:
+#   1. Survive TrueNAS updates. /usr gets replaced on update, which wipes
+#      our custom nvidia.raw and restores stock. Compare SHAs between live
+#      and persistent backup; if they differ, restore the custom.
+#   2. Detect kernel-version mismatch. TrueNAS updates often bump the
+#      kernel; our bundled nvidia.ko targets a specific kernel and will
+#      simply not load against a different one. Surface the mismatch
+#      loudly in syslog with a pointer at the release page so the user
+#      doesn't end up debugging "nvidia-smi reports no devices" via
+#      strace.
+#   3. Start nvidia-mig-setup.service (idempotent) so MIG instances are
+#      recreated each boot.
 #
 # Registered via midclt initshutdownscript by install-nvidia-sysext.sh.
-# Never exits non-zero — must not block boot.
+# Logs to both stdout (visible via journalctl -u <init-shutdown-script>)
+# and syslog tagged `nvidia-preinit-full` (journalctl -b -t nvidia-preinit-full
+# for boot-scoped filtering).
+#
+# Never exits non-zero — must not block boot. All errors are logged and
+# the script continues. The kernel-mismatch and SHA-restore branches
+# print clear remediation hints.
 
 set -uo pipefail
 
-log() { echo "[nvidia-preinit-full] $*"; }
+log() {
+    echo "[nvidia-preinit-full] $*"
+    logger -t nvidia-preinit-full "$*" 2>/dev/null || true
+}
+
+# Track /usr writable state for the trap. Without this, a SIGTERM
+# between `zfs set readonly=off` and the matching readonly=on would
+# leave /usr writable until the next reboot.
+USR_WAS_WRITABLE=0
+USR_DATASET=""
+
+restore_usr_readonly() {
+    if [ "$USR_WAS_WRITABLE" = "1" ] && [ -n "$USR_DATASET" ]; then
+        zfs set readonly=on "$USR_DATASET" 2>/dev/null || true
+        USR_WAS_WRITABLE=0
+    fi
+}
+trap restore_usr_readonly EXIT INT TERM
 
 log "Starting (boot: $(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown))"
 
+REPO="truenas-community-sysexts/nvidia-mig-support"
 SYSEXT_DIR="/usr/share/truenas/sysext-extensions"
 LIVE_NVIDIA="${SYSEXT_DIR}/nvidia.raw"
 
@@ -25,6 +56,7 @@ for f in /mnt/*/.config/nvidia-gpu/nvidia.raw; do
     [ -f "$f" ] && PERSIST_NVIDIA="$f" && break
 done
 
+# ── Phase 1: restore-from-backup if live differs from persistent ─────────
 if [ -z "$PERSIST_NVIDIA" ]; then
     log "No persistent custom nvidia.raw found; nothing to restore"
 else
@@ -33,23 +65,41 @@ else
     LIVE_SHA=""
     [ -f "$LIVE_NVIDIA" ] && LIVE_SHA=$(sha256sum "$LIVE_NVIDIA" 2>/dev/null | awk '{print $1}')
 
-    if [ "$LIVE_SHA" = "$PERSIST_SHA" ]; then
+    # Empty-SHA defensive: if either hash failed to compute, treat as
+    # mismatch and reinstall rather than treating two empty strings as
+    # equal (which is what the bare equality check would do).
+    NEED_RESTORE=true
+    if [ -z "$PERSIST_SHA" ] || [ -z "$LIVE_SHA" ]; then
+        log "WARNING: failed to read sha256 (live='${LIVE_SHA}', persist='${PERSIST_SHA}'); restoring defensively"
+    elif [ "$LIVE_SHA" = "$PERSIST_SHA" ]; then
         log "Live nvidia.raw matches persistent custom; no restore needed"
+        NEED_RESTORE=false
     else
         log "Live nvidia.raw differs from custom (likely after TrueNAS update); restoring"
-        log "  live SHA:    ${LIVE_SHA:-<missing>}"
+        log "  live SHA:    $LIVE_SHA"
         log "  persist SHA: $PERSIST_SHA"
+    fi
 
+    if $NEED_RESTORE; then
         systemd-sysext unmerge 2>/dev/null || true
 
         USR_DATASET=$(zfs list -H -o name /usr 2>/dev/null)
         if [ -n "$USR_DATASET" ]; then
-            zfs set readonly=off "$USR_DATASET" \
-                || { log "ERROR: failed to set $USR_DATASET writable"; exit 0; }
-            cp "$PERSIST_NVIDIA" "$LIVE_NVIDIA" \
-                || { log "ERROR: failed to copy custom nvidia.raw"; zfs set readonly=on "$USR_DATASET"; exit 0; }
-            zfs set readonly=on "$USR_DATASET" || log "WARN: failed to restore readonly"
-            log "Restored custom nvidia.raw"
+            if zfs set readonly=off "$USR_DATASET" 2>/dev/null; then
+                USR_WAS_WRITABLE=1
+                if cp "$PERSIST_NVIDIA" "$LIVE_NVIDIA"; then
+                    log "Restored custom nvidia.raw"
+                else
+                    log "ERROR: failed to copy custom nvidia.raw"
+                fi
+                zfs set readonly=on "$USR_DATASET" 2>/dev/null \
+                    || log "WARN: failed to restore /usr readonly"
+                USR_WAS_WRITABLE=0
+            else
+                log "ERROR: failed to set $USR_DATASET writable; cannot restore"
+            fi
+        else
+            log "WARN: could not resolve /usr dataset; cannot restore"
         fi
 
         mkdir -p /etc/extensions
@@ -59,7 +109,51 @@ else
     fi
 fi
 
-# --- Start the bundled MIG service (idempotent) ---
+# ── Phase 2: kernel-version mismatch detection ────────────────────────────
+# nvidia.ko is built against a specific kernel. After a TrueNAS update
+# bumps the kernel, our bundled module silently won't load and the user
+# is left with "nvidia-smi: NVIDIA-SMI couldn't find any device" with no
+# obvious cause. Surface the mismatch with a clear pointer at the release
+# page so the user knows what's needed (a new sysext built for the new
+# kernel — coming from check-releases auto-bumps).
+#
+# nvidia.ko lives at /usr/lib/modules/<kver>/updates/dkms/nvidia.ko inside
+# the sysext (see build-nvidia-sysext.sh: MODULES_DEST=…/updates/dkms).
+# Module loading is normally driven by udev when the GPU PCI device is
+# probed — we don't insmod here. We only verify the file exists for the
+# running kernel.
+RUNNING_KVER=$(uname -r)
+EXPECTED_KO="/usr/lib/modules/${RUNNING_KVER}/updates/dkms/nvidia.ko"
+if [ -f "$EXPECTED_KO" ]; then
+    log "Kernel-module path matches running kernel ${RUNNING_KVER}"
+else
+    # Scan /usr/lib/modules/ for any nvidia.ko in a different kernel
+    # directory — that's almost certainly the version the sysext was
+    # built for.
+    SYSEXT_KVER=""
+    for d in /usr/lib/modules/*/; do
+        [ -d "$d" ] || continue
+        name=${d%/}
+        name=${name##*/}
+        [ "$name" = "$RUNNING_KVER" ] && continue
+        if [ -f "${d}updates/dkms/nvidia.ko" ] || [ -f "${d}extra/nvidia.ko" ]; then
+            SYSEXT_KVER="$name"
+            break
+        fi
+    done
+    if [ -n "$SYSEXT_KVER" ]; then
+        log "ERROR: kernel-version mismatch — running ${RUNNING_KVER} but sysext bundles modules for ${SYSEXT_KVER}"
+        log "ERROR: TrueNAS was likely updated to a new kernel. Re-install a sysext matching ${RUNNING_KVER}:"
+        log "ERROR:   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install-nvidia-sysext.sh | sudo bash"
+        log "ERROR:   (auto-detects the new TrueNAS version and picks a matching release)"
+        log "ERROR: Or browse: https://github.com/${REPO}/releases"
+    else
+        log "WARNING: nvidia.ko not found at ${EXPECTED_KO} and no other kernel-version directory has one either"
+        log "WARNING: the sysext may not be merged, or the build is broken — check 'systemd-sysext status'"
+    fi
+fi
+
+# ── Phase 3: start the bundled MIG service (idempotent) ──────────────────
 if [ -x /usr/bin/nvidia-mig-setup ]; then
     log "Starting nvidia-mig-setup.service"
     systemctl start nvidia-mig-setup.service \
