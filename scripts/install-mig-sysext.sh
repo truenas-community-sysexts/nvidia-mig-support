@@ -123,7 +123,7 @@ except Exception:
     printf '%s\n' "$tag"
 }
 
-if [ "$(id -u)" -ne 0 ]; then
+if [ "$(id -u 2>/dev/null)" != "0" ]; then
     echo "ERROR: must run as root" >&2
     exit 1
 fi
@@ -316,38 +316,57 @@ do_check() {
             "unsquashfs missing or sysext file unreadable"
     fi
 
-    # MIG sysext file on persist dir
-    if [ -n "${PERSIST_DIR:-}" ] && [ -f "${PERSIST_DIR}/nvidia-mig.raw" ]; then
-        record_pass "MIG sysext present at ${PERSIST_DIR}/nvidia-mig.raw"
-    elif [ -n "${PERSIST_DIR:-}" ]; then
-        record_fail "MIG sysext missing at ${PERSIST_DIR}/nvidia-mig.raw" \
-            "re-run install-mig-sysext.sh"
+    # Bundled-MIG detection: the full-driver nvidia.raw can be built with
+    # BUNDLE_MIG=true (default), which packs configure-mig + nvidia-mig-setup
+    # service + binary directly into nvidia.raw. In that case the separate
+    # MIG sysext is genuinely not needed — and the file/symlink/merge checks
+    # below would all (correctly) fail, which is confusing. Detect the case
+    # by: (a) nvidia merged, (b) /usr/bin/configure-mig present (provided
+    # by the bundled sysext), (c) nvidia-mig NOT merged. Collapse the three
+    # MIG-sysext-specific checks into one pass.
+    local bundled_mig=false
+    if systemd-sysext list 2>/dev/null | awk '{print $1}' | grep -qx nvidia \
+        && [ -x /usr/bin/configure-mig ] \
+        && ! systemd-sysext list 2>/dev/null | awk '{print $1}' | grep -qx nvidia-mig; then
+        bundled_mig=true
     fi
 
-    # /etc/extensions/ symlink
-    if [ -L /etc/extensions/nvidia-mig.raw ]; then
-        local target
-        target=$(readlink -f /etc/extensions/nvidia-mig.raw 2>/dev/null || true)
-        if [ -n "$target" ] && [ -f "$target" ]; then
-            record_pass "/etc/extensions/nvidia-mig.raw symlink resolves to ${target}"
-        else
-            record_fail "/etc/extensions/nvidia-mig.raw symlink dangling (target missing)" \
-                "re-run install — persistent copy was removed"
+    if $bundled_mig; then
+        record_pass "MIG tooling provided by bundled full-driver sysext (nvidia.raw built with BUNDLE_MIG=true) — separate MIG sysext not needed"
+    else
+        # MIG sysext file on persist dir
+        if [ -n "${PERSIST_DIR:-}" ] && [ -f "${PERSIST_DIR}/nvidia-mig.raw" ]; then
+            record_pass "MIG sysext present at ${PERSIST_DIR}/nvidia-mig.raw"
+        elif [ -n "${PERSIST_DIR:-}" ]; then
+            record_fail "MIG sysext missing at ${PERSIST_DIR}/nvidia-mig.raw" \
+                "re-run install-mig-sysext.sh"
         fi
-    elif [ -f /etc/extensions/nvidia-mig.raw ]; then
-        record_warn "/etc/extensions/nvidia-mig.raw is a regular file, not a symlink" \
-            "install creates a symlink to the persistent copy — re-run install"
-    else
-        record_fail "/etc/extensions/nvidia-mig.raw missing" \
-            "re-run install"
-    fi
 
-    # MIG sysext merged
-    if systemd-sysext list 2>/dev/null | awk '{print $1}' | grep -qx nvidia-mig; then
-        record_pass "MIG sysext 'nvidia-mig' merged into /usr"
-    else
-        record_fail "MIG sysext 'nvidia-mig' not currently merged" \
-            "check 'systemctl status systemd-sysext' or re-run install"
+        # /etc/extensions/ symlink
+        if [ -L /etc/extensions/nvidia-mig.raw ]; then
+            local target
+            target=$(readlink -f /etc/extensions/nvidia-mig.raw 2>/dev/null || true)
+            if [ -n "$target" ] && [ -f "$target" ]; then
+                record_pass "/etc/extensions/nvidia-mig.raw symlink resolves to ${target}"
+            else
+                record_fail "/etc/extensions/nvidia-mig.raw symlink dangling (target missing)" \
+                    "re-run install — persistent copy was removed"
+            fi
+        elif [ -f /etc/extensions/nvidia-mig.raw ]; then
+            record_warn "/etc/extensions/nvidia-mig.raw is a regular file, not a symlink" \
+                "install creates a symlink to the persistent copy — re-run install"
+        else
+            record_fail "/etc/extensions/nvidia-mig.raw missing" \
+                "re-run install"
+        fi
+
+        # MIG sysext merged
+        if systemd-sysext list 2>/dev/null | awk '{print $1}' | grep -qx nvidia-mig; then
+            record_pass "MIG sysext 'nvidia-mig' merged into /usr"
+        else
+            record_fail "MIG sysext 'nvidia-mig' not currently merged" \
+                "check 'systemctl status systemd-sysext' or re-run install"
+        fi
     fi
 
     # Persist dir

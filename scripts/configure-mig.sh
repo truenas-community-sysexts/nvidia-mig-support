@@ -45,7 +45,7 @@ for arg in "$@"; do
     esac
 done
 
-[ "$(id -u)" -eq 0 ] || { echo "ERROR: must run as root" >&2; exit 1; }
+[ "$(id -u 2>/dev/null)" = "0" ] || { echo "ERROR: must run as root" >&2; exit 1; }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers (defined before any call site)
