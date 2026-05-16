@@ -117,15 +117,24 @@ fi
 # page so the user knows what's needed (a new sysext built for the new
 # kernel — coming from check-releases auto-bumps).
 #
-# nvidia.ko lives at /usr/lib/modules/<kver>/updates/dkms/nvidia.ko inside
-# the sysext (see build-nvidia-sysext.sh: MODULES_DEST=…/updates/dkms).
 # Module loading is normally driven by udev when the GPU PCI device is
 # probed — we don't insmod here. We only verify the file exists for the
 # running kernel.
+#
+# Path-finding strategy: search anywhere under /usr/lib/modules/<kver>/
+# rather than hard-coding the subdir. On TrueNAS the merged custom sysext
+# lands nvidia.ko at .../video/nvidia.ko (not .../updates/dkms/nvidia.ko
+# like the build-script staging would suggest — depmod / installer
+# normalize the layout on merge). Also tolerant of compressed modules
+# (nvidia.ko.zst / .xz / .gz) for future kernels.
 RUNNING_KVER=$(uname -r)
-EXPECTED_KO="/usr/lib/modules/${RUNNING_KVER}/updates/dkms/nvidia.ko"
-if [ -f "$EXPECTED_KO" ]; then
-    log "Kernel-module path matches running kernel ${RUNNING_KVER}"
+RUNNING_KO_DIR="/usr/lib/modules/${RUNNING_KVER}"
+RUNNING_KO=""
+if [ -d "$RUNNING_KO_DIR" ]; then
+    RUNNING_KO=$(find "$RUNNING_KO_DIR" -name 'nvidia.ko*' -type f -print 2>/dev/null | head -1)
+fi
+if [ -n "$RUNNING_KO" ]; then
+    log "Kernel-module path matches running kernel ${RUNNING_KVER} (${RUNNING_KO})"
 else
     # Scan /usr/lib/modules/ for any nvidia.ko in a different kernel
     # directory — that's almost certainly the version the sysext was
@@ -136,7 +145,7 @@ else
         name=${d%/}
         name=${name##*/}
         [ "$name" = "$RUNNING_KVER" ] && continue
-        if [ -f "${d}updates/dkms/nvidia.ko" ] || [ -f "${d}extra/nvidia.ko" ]; then
+        if [ -n "$(find "$d" -name 'nvidia.ko*' -type f -print 2>/dev/null | head -1)" ]; then
             SYSEXT_KVER="$name"
             break
         fi
@@ -148,7 +157,7 @@ else
         log "ERROR:   (auto-detects the new TrueNAS version and picks a matching release)"
         log "ERROR: Or browse: https://github.com/${REPO}/releases"
     else
-        log "WARNING: nvidia.ko not found at ${EXPECTED_KO} and no other kernel-version directory has one either"
+        log "WARNING: nvidia.ko not found anywhere under ${RUNNING_KO_DIR}/ and no other kernel-version directory has one either"
         log "WARNING: the sysext may not be merged, or the build is broken — check 'systemd-sysext status'"
     fi
 fi
