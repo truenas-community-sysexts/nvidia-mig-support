@@ -492,8 +492,17 @@ echo "Persist dir: $PERSIST_DIR"
 echo ""
 
 # --- Verify the source is a usable sysext ---
+# Buffer the listing before grepping. `unsquashfs -l … | grep -q` is
+# broken under `set -o pipefail`: grep -q exits early on first match,
+# SIGPIPEs unsquashfs, pipefail propagates non-zero 141, the `||` block
+# falsely fires even when the file IS present. See install-nvidia-sysext.sh
+# for the same fix.
 if command -v unsquashfs >/dev/null 2>&1; then
-    if ! unsquashfs -l "$SYSEXT_SRC" 2>/dev/null | grep -q 'extension-release.nvidia-mig'; then
+    if ! SYSEXT_LISTING=$(unsquashfs -l "$SYSEXT_SRC" 2>/dev/null); then
+        echo "ERROR: unsquashfs -l failed on $SYSEXT_SRC" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$SYSEXT_LISTING" | grep -q 'extension-release.nvidia-mig'; then
         echo "ERROR: $SYSEXT_SRC does not contain extension-release.nvidia-mig" >&2
         exit 1
     fi
