@@ -94,3 +94,26 @@ When a build runs with `mark_latest=false` (the auto-cadence case), the build wo
 Label / issue creation is idempotent: existing labels return 422 (handled), and if an open `hardware-test` issue already mentions the release tag in its title, the step skips the duplicate creation. So manually re-triggering an auto-build won't spam the tracker.
 
 Promotion to "Latest" can't be done automatically — it requires human acknowledgement that hardware verification passed. The flag and the issue together encode that pre-merge / post-merge gate.
+
+## MIG packaging: bundled vs standalone
+
+NVIDIA's MIG tooling (`configure-mig`, `nvidia-mig-setup.service`, the MIG setup binary) can ship two ways:
+
+| Path | Sysext | When |
+| --- | --- | --- |
+| **Bundled** (default) | Inside `nvidia.raw` (full-driver build with `BUNDLE_MIG=true`) | You're replacing TrueNAS's stock NVIDIA driver with a custom build (typical for users on Blackwell GPUs needing a newer driver than stock ships). |
+| **Standalone** | Inside `nvidia-mig.raw` (the lightweight sysext) | You're keeping TrueNAS's stock driver and just adding MIG capability on top. |
+
+Both paths produce a working MIG install. They differ only in which sysext owns the MIG bits:
+
+- **Bundled** is what `workflow_dispatch` on `build-nvidia-sysext.yml` does by default (`bundle_mig` input defaults to `true`). The full-driver sysext gets `configure-mig` plus the service, no separate sysext needed. If you've installed via `install-nvidia-sysext.sh`, you're on this path. Running `install-mig-sysext.sh --check` against this state reports `MIG tooling provided by bundled full-driver sysext (nvidia.raw built with BUNDLE_MIG=true) — separate MIG sysext not needed`.
+- **Standalone** is the right call when stock TrueNAS already ships a driver new enough for your hardware and you just want MIG support on top of it. Build via `build-mig-sysext.yml` (always produces `nvidia-mig.raw`, no `BUNDLE_MIG` knob). Install via `install-mig-sysext.sh`, which refuses to run if stock driver < `MIN_DRIVER_MAJOR` (570 today).
+
+What this means for the release line:
+
+- Every `build-nvidia-sysext.yml` dispatch produces *one* `v<truenas>-nvidia<driver>-r<run>` release. The release notes say `MIG bundled: true|false` — by default `true`. If you want a non-bundled full-driver release for some reason, dispatch with `bundle_mig=false`.
+- Every `build-mig-sysext.yml` dispatch produces *one* `v<truenas>-mig-r<run>` release. There's no bundled-vs-standalone variant on this one — it's always the standalone path.
+
+What this does *not* mean: you do not need to install both. Pick one path. Running both leads to two sysexts trying to provide MIG tooling — the merge order is undefined and the install scripts intentionally don't try to detect this misconfiguration (it would require teaching each script about the other's persistent state).
+
+`bundle_mig` is **kept** in the workflow input list rather than removed because there are legitimate cases for the unbundled full-driver release: someone wants the stock TrueNAS MIG flow but a newer NVIDIA driver, or someone is debugging a MIG-tooling issue and wants the install scripts to refuse to layer the standalone sysext on top. Flag stays; default stays `true`.

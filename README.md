@@ -46,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mi
   | sudo bash
 ```
 
-Downloads `nvidia-mig.raw` from the rolling `dev-mig-sysext` prerelease, copies it to your persistent pool, symlinks it into `/etc/extensions/`, merges the sysext, and registers a TrueNAS PREINIT entry so MIG instances are recreated on every boot. **No reboot required** — the stock driver keeps running.
+Auto-detects your TrueNAS version, picks the matching `v<version>-mig-r<run>` release, downloads `nvidia-mig.raw`, copies it to your persistent pool, symlinks it into `/etc/extensions/`, merges the sysext, and registers a TrueNAS PREINIT entry so MIG instances are recreated on every boot. **No reboot required** — the stock driver keeps running.
 
 Multi-pool host? The script auto-picks the right pool when there's an existing config dir or only one data pool; otherwise it prompts. To skip detection and pin the pool explicitly:
 
@@ -59,7 +59,7 @@ Then `sudo configure-mig` to set up your MIG layout — see [Configure MIG](#con
 
 ## Install — full driver
 
-Uses the auto-built `dev-nvidia-sysext` rolling prerelease — currently **NVIDIA 580.126.18 on TrueNAS 25.10.3.1, open kernel modules**. The release is rebuilt on every push to `main`, so it's always current with the source.
+Auto-detects your TrueNAS version, picks the matching `v<version>-nvidia<driver>-r<run>` release, and installs it. Today's latest pairing is **NVIDIA 595.58.03 on TrueNAS 25.10.3.1, open kernel modules** — bumped automatically by the daily `check-releases.yml` workflow when either upstream moves. To pin to a specific driver/release, pass `--release=v25.10.3.1-nvidia580.126.18-r10` (see `--help` for full flag list).
 
 On TrueNAS, as root:
 
@@ -90,6 +90,35 @@ sudo configure-mig --mig=14,14,14,14 --skip-app-mapping
 ```
 
 It validates your profile list (slice budget, instance caps, `+me.all` / OFA conflicts), writes `mig.conf` to persistent storage, restarts the MIG service to create the instances, then walks you through assigning each MIG device to a TrueNAS app. See [docs/mig-profiles.md](docs/mig-profiles.md) for the full profile reference.
+
+## Verify or preview an install
+
+Both install scripts accept three flags that are useful before, during, and after an actual install:
+
+- **`--check`** — read-only probe of an existing install. Reports a pass/warn/fail summary on sysext merge state, kernel-module loading, driver-version match (sysext blob vs `nvidia-smi` runtime), persist dir, stock backup, PREINIT registration, and `configure-mig` availability. Useful any time you suspect something's drifted (e.g., after a TrueNAS update).
+- **`--dry-run`** — walks through what install would do, downloads + validates the sysext, but skips every mutation. Each skipped step prints `[dry-run] would: …`. Useful before installing on a production box, or to check whether a specific tag is reachable + sane.
+- **`--release=TAG`** — pin to a specific release (override the latest-tag auto-resolution). Combines with the others: `--check --release=v25.10.3.1-nvidia580.126.18-r10` probes against that tag's expected state.
+
+```bash
+# Probe current install state (no mutation)
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-nvidia-sysext.sh | sudo bash -s -- --check
+
+# Walk through what install would do (no mutation)
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-nvidia-sysext.sh | sudo bash -s -- --dry-run
+
+# Pin to a specific release tag
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-nvidia-sysext.sh | sudo bash -s -- --release=v25.10.3.1-nvidia580.126.18-r10
+```
+
+`--check` and `--dry-run` are mutually exclusive. Run `… | sudo bash -s -- --help` for the full flag list including `--pool`, `--persist-path`, and `--skip-backup-check`.
+
+Boot-time diagnostic for the full-driver path: the PREINIT script logs to syslog with a dedicated tag, so you can see exactly what happened on the last boot without trawling the whole journal:
+
+```bash
+sudo journalctl -b -t nvidia-preinit-full
+```
+
+Look for `Kernel-module path matches running kernel <kver>` (good) or `ERROR: kernel-version mismatch` (TrueNAS bumped the kernel and the bundled `nvidia.ko` no longer matches — re-run the install one-liner to pick up the newer release).
 
 ## Uninstall
 
@@ -124,10 +153,17 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mi
 
 All scripts support `--help` for the full flag list. The install scripts bundle `configure-mig` and the matching `uninstall-*` command into your `PATH` so routine reconfig and teardown don't need network access.
 
+**Pick one install path** — running both leaves two sysexts trying to provide MIG tooling, with undefined merge ordering:
+
+- **`install-nvidia-sysext.sh`** if you need a newer NVIDIA driver than the one TrueNAS ships. MIG tooling is bundled by default (`BUNDLE_MIG=true` at build time), so this single sysext gives you both the new driver *and* MIG. **Reboot required** (live-swapping the driver leaves stale modules in RAM). This is the path Blackwell-class GPU users will typically want.
+- **`install-mig-sysext.sh`** if TrueNAS's stock driver is fine for your hardware and you just need MIG layered on top. No reboot. Refuses if stock driver is older than 570.x.
+
+See [docs/build-ci-notes.md](docs/build-ci-notes.md#mig-packaging-bundled-vs-standalone) for the bundled-vs-standalone tradeoffs in more depth.
+
 | Script | Run when | What it does |
 | --- | --- | --- |
 | [`install-mig-sysext.sh`](scripts/install-mig-sysext.sh) | Adding MIG to a host that keeps TrueNAS's stock driver | Auto-detects local TrueNAS version, picks the matching `v<version>-mig-r<run>` release, downloads `nvidia-mig.raw`, deploys it next to the stock sysext, registers a TrueNAS PREINIT entry. No reboot. |
-| [`install-nvidia-sysext.sh`](scripts/install-nvidia-sysext.sh) | Replacing TrueNAS's stock driver with a custom one | Auto-detects local TrueNAS version, picks the matching `v<version>-nvidia<driver>-r<run>` release, downloads `nvidia.raw`, swaps the stock sysext, registers a PREINIT entry that re-applies after TrueNAS updates. **Reboot required.** |
+| [`install-nvidia-sysext.sh`](scripts/install-nvidia-sysext.sh) | Replacing TrueNAS's stock driver with a custom one (MIG bundled in by default) | Auto-detects local TrueNAS version, picks the matching `v<version>-nvidia<driver>-r<run>` release, downloads `nvidia.raw` (with `configure-mig` + `nvidia-mig-setup.service` baked in unless built with `--no-mig-bundle`), swaps the stock sysext, registers a PREINIT entry that re-applies after TrueNAS updates. **Reboot required.** |
 | [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Before `install-nvidia-sysext.sh` if you don't already have a stock backup | Pulls the stock `nvidia.raw` out of the official TrueNAS `.update` archive and stores it as `nvidia-original.raw` for later restore. |
 | `configure-mig` *(bundled in both sysexts at `/usr/bin/configure-mig`)* | After install, and any time you want to change the MIG layout | Validates your MIG profile string, writes `mig.conf`, restarts the MIG service, then walks you through assigning each MIG device to a TrueNAS app. |
 | `uninstall-nvidia-mig` *(bundled in the lightweight sysext at `/usr/bin/uninstall-nvidia-mig`; source: [`uninstall-mig-sysext.sh`](scripts/uninstall-mig-sysext.sh))* | Removing the lightweight sysext | Removes the symlink, re-merges sysext, deregisters PREINIT. Stock driver untouched. |

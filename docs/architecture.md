@@ -69,7 +69,7 @@ Adds MIG tooling on top of TrueNAS's stock NVIDIA driver. The stock `nvidia.raw`
               └─ /usr/lib/extension-release.d/extension-release.nvidia-mig  (ID=_any)
 ```
 
-Built locally in <1 s via `mksquashfs`. Auto-published to the `dev-mig-sysext` rolling prerelease on every push.
+Built locally in <1 s via `mksquashfs`. Each `Build MIG Sysext` workflow run publishes an immutable `v<truenas>-mig-r<run>` release (manual dispatch promotes it to "Latest"; auto-cadence dispatches open a hardware-test issue first). See [docs/build-ci-notes.md](build-ci-notes.md#release-tagging-scheme) for the tag scheme.
 
 ### Full-driver path (`nvidia.raw`)
 
@@ -102,7 +102,7 @@ Workflow dispatch input controls `nvidia_version`, `truenas_version`, `kernel_mo
 
 ## Building a custom nvidia.raw
 
-The rolling `dev-nvidia-sysext` release covers the common case: NVIDIA 580.126.18 + TrueNAS 25.10.3.1 + open kernel modules, auto-rebuilt on every push to `main`. If you want a different combination — newer driver, older driver, proprietary kernel modules, a different TrueNAS version — trigger a parameterized build via `workflow_dispatch`:
+The daily `check-releases.yml` workflow watches `download.nvidia.com/.../latest.txt` and `truenas/scale-build` tags and fires `Build Full NVIDIA Sysext` automatically when either moves, producing a fresh `v<truenas>-nvidia<driver>-r<run>` release marked `mark_latest=false` until a human hardware-verifies it (see [docs/build-ci-notes.md](build-ci-notes.md#auto-cadence-check-releasesyml)). If you want a different combination — older driver, proprietary kernel modules, a different TrueNAS version, `--no-mig-bundle` — trigger a parameterized build via `workflow_dispatch`:
 
 ```bash
 gh workflow run build-nvidia-sysext.yml \
@@ -138,7 +138,7 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mi
   | sudo bash -s -- --sysext=/tmp/nvidia.raw
 ```
 
-`--sysext=PATH` skips the default download from `dev-nvidia-sysext` and uses the file you provide.
+`--sysext=PATH` skips the default release-API resolution and uses the file you provide. `--release=TAG` pins to a specific tag (e.g. `v25.10.3.1-nvidia580.126.18-r10`) instead of the auto-detected latest. See `install-nvidia-sysext.sh --help` for the full flag list, plus `--check` (read-only probe) and `--dry-run` (validate without mutating).
 
 ## Boot-time activation: TrueNAS PREINIT
 

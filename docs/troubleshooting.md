@@ -122,13 +122,22 @@ If `system.ready` returns `true` and `midclt` calls still fail, that's a genuine
 **Fix (usually nothing):** Reboot once after the TrueNAS update completes. The PREINIT script handles the re-application automatically. Verify it ran:
 
 ```bash
-sudo journalctl -b 0 | grep nvidia-preinit-full
+sudo journalctl -b -t nvidia-preinit-full
 sudo /usr/bin/nvidia-smi --query-gpu=driver_version --format=csv,noheader
 ```
 
 The driver version should match what you installed, not the version TrueNAS just shipped.
 
-If something went wrong and the PREINIT didn't run (or the persistent `/mnt/<pool>/.config/nvidia-gpu/nvidia.raw` is missing): re-run `install-nvidia-sysext.sh`.
+A more structured probe in one shot — `install-nvidia-sysext.sh --check` reports all of the same state (sysext merged, kernel module loaded, driver-version match between the sysext blob and `nvidia-smi` runtime, PREINIT registration, etc.) in a pass/warn/fail summary, without modifying anything:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-nvidia-sysext.sh \
+  | sudo bash -s -- --check
+```
+
+A clean run prints `Checks: 9 pass, 0 warn, 0 fail`. The most actionable failure to look for is a kernel-version mismatch — the PREINIT script writes `ERROR: kernel-version mismatch — running <kver> but sysext bundles modules for <kver>` to the syslog tag above when this happens, and points at the install one-liner to fix.
+
+If something went wrong and the PREINIT didn't run (or the persistent `/mnt/<pool>/.config/nvidia-gpu/nvidia.raw` is missing): re-run `install-nvidia-sysext.sh`. Use `--dry-run` first if you want to walk through what it would do before letting it mutate the system.
 
 ## MIG instances don't come back after reboot
 
