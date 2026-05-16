@@ -113,6 +113,44 @@ jobs:
           unsquashfs -l dist/nvidia-mig.raw
           ls -la dist/
 
+      - name: Smoke-test nvidia-mig.raw contents
+        # Independently re-open the produced sysext and verify each component
+        # the release advertises is present at the right path. No kernel
+        # module ships in the MIG-only sysext (it layers on top of stock
+        # nvidia.raw) so this is path-presence only — no ELF or vermagic
+        # checks. Mirrors hailo8-support's build.yml smoke-test pattern.
+        run: |
+          set -e
+          SMOKE_TMP="$(mktemp -d)"
+          trap 'rm -rf "$SMOKE_TMP"' EXIT
+
+          unsquashfs -d "${SMOKE_TMP}/extract" dist/nvidia-mig.raw >/dev/null
+
+          fail=0
+          require_file() {
+            local rel="$1"
+            local path="${SMOKE_TMP}/extract/${rel}"
+            if [ ! -e "$path" ]; then
+              echo "::error title=smoke-test::missing in nvidia-mig.raw: ${rel}"
+              fail=1
+              return
+            fi
+            echo "  ok: ${rel}"
+          }
+
+          echo "=== smoke-test: required paths ==="
+          require_file "usr/lib/extension-release.d/extension-release.nvidia-mig"
+          require_file "usr/bin/nvidia-mig-setup"
+          require_file "usr/bin/configure-mig"
+          require_file "usr/bin/uninstall-nvidia-mig"
+          require_file "usr/lib/systemd/system/nvidia-mig-setup.service"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error title=smoke-test::nvidia-mig.raw is missing required components — refusing to publish"
+            exit 1
+          fi
+          echo "smoke-test OK"
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
         with:
