@@ -15,11 +15,13 @@
 # the newest matching one.
 #
 # Override with --release=TAG (specific tag) or --sysext=PATH (local file).
-# Use --check to probe an existing install without making changes.
+# Use --check to probe an existing install, or --dry-run to walk through the
+# install without making changes.
 #
 # Usage:
 #   sudo ./install-mig-sysext.sh                              # auto-detect + install
 #   sudo ./install-mig-sysext.sh --check                      # read-only status probe
+#   sudo ./install-mig-sysext.sh --dry-run                    # validate, skip mutations
 #   sudo ./install-mig-sysext.sh --release=v25.10.3.1-mig-r5
 #   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw # local file
 #   sudo ./install-mig-sysext.sh --pool=fast
@@ -36,6 +38,10 @@
 #                         file/symlink/merge, persist dir, mig.conf, PREINIT
 #                         registration, nvidia-mig-setup.service status.
 #                         Exits 1 if anything fails.
+#   --dry-run             Validate URL + downloaded sysext but skip every
+#                         command that would mutate the running system.
+#                         Each skipped mutation is logged as `[dry-run] would: ...`.
+#                         Mutually exclusive with --check.
 #   -h, --help            Show this help and exit
 #
 # Pool selection priority: --persist-path > --pool > existing config dir > only
@@ -57,6 +63,7 @@ POOL_NAME=""
 PERSIST_PATH=""
 FORCE=false
 CHECK_MODE=false
+DRY_RUN=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -66,13 +73,30 @@ for arg in "$@"; do
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         --force) FORCE=true ;;
         --check) CHECK_MODE=true ;;
+        --dry-run) DRY_RUN=true ;;
         -h|--help)
-            sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
+
+if $CHECK_MODE && $DRY_RUN; then
+    echo "ERROR: --check and --dry-run are mutually exclusive" >&2
+    exit 2
+fi
+
+# Run a command in real mode; print `[dry-run] would: …` in dry-run mode.
+# For redirections or compound shell logic, gate manually with
+# `if $DRY_RUN; then ... else ... fi`.
+if_real() {
+    if $DRY_RUN; then
+        printf '[dry-run] would: %s\n' "$*"
+    else
+        "$@"
+    fi
+}
 
 resolve_release_tag() {
     # Returns the release tag on stdout.
@@ -476,21 +500,21 @@ if command -v unsquashfs >/dev/null 2>&1; then
 fi
 
 # --- Copy to persistent storage ---
-mkdir -p "$PERSIST_DIR"
-cp "$SYSEXT_SRC" "${PERSIST_DIR}/nvidia-mig.raw"
-echo "Copied to ${PERSIST_DIR}/nvidia-mig.raw"
+if_real mkdir -p "$PERSIST_DIR"
+if_real cp "$SYSEXT_SRC" "${PERSIST_DIR}/nvidia-mig.raw"
+$DRY_RUN || echo "Copied to ${PERSIST_DIR}/nvidia-mig.raw"
 
 # --- Symlink into /etc/extensions/ alongside stock nvidia ---
-mkdir -p /etc/extensions
-ln -sf "${PERSIST_DIR}/nvidia-mig.raw" /etc/extensions/nvidia-mig.raw
-echo "Symlinked /etc/extensions/nvidia-mig.raw"
+if_real mkdir -p /etc/extensions
+if_real ln -sf "${PERSIST_DIR}/nvidia-mig.raw" /etc/extensions/nvidia-mig.raw
+$DRY_RUN || echo "Symlinked /etc/extensions/nvidia-mig.raw"
 
 # --- Re-merge sysext to overlay the new extension ---
 echo ""
 echo "Re-merging systemd-sysext..."
-systemd-sysext unmerge
-systemd-sysext merge
-systemctl daemon-reload
+if_real systemd-sysext unmerge
+if_real systemd-sysext merge
+if_real systemctl daemon-reload
 
 # --- Register PREINIT script via midclt for boot-time activation ---
 # WantedBy=multi-user.target doesn't reliably activate sysext-shipped units
@@ -517,7 +541,13 @@ except Exception:
 
 PREINIT_JSON="{\"type\": \"COMMAND\", \"command\": \"${PREINIT_CMD}\", \"when\": \"PREINIT\", \"enabled\": true, \"timeout\": 120, \"comment\": \"${PREINIT_COMMENT}\"}"
 
-if [ -n "$EXISTING_ID" ]; then
+if $DRY_RUN; then
+    if [ -n "$EXISTING_ID" ]; then
+        echo "[dry-run] would: midclt call initshutdownscript.update ${EXISTING_ID} '${PREINIT_JSON}'"
+    else
+        echo "[dry-run] would: midclt call initshutdownscript.create '${PREINIT_JSON}'"
+    fi
+elif [ -n "$EXISTING_ID" ]; then
     echo "PREINIT entry already exists (id: ${EXISTING_ID}), updating..."
     midclt call initshutdownscript.update "$EXISTING_ID" "$PREINIT_JSON" >/dev/null \
         || echo "WARNING: Failed to update PREINIT entry"
@@ -528,6 +558,20 @@ else
 fi
 
 # --- Verify ---
+# Skipped under --dry-run: no merge happened, so the verification would
+# (correctly) flag everything as missing. Print a summary banner instead.
+if $DRY_RUN; then
+    echo ""
+    echo "=== Dry-run complete; no system changes applied ==="
+    echo ""
+    echo "URL reachability, downloaded-sysext sanity, midclt-query, and"
+    echo "PERSIST_DIR resolution all ran for real. Every mutation was"
+    echo "logged as '[dry-run] would: ...' but not executed."
+    echo ""
+    echo "Re-run without --dry-run to apply."
+    exit 0
+fi
+
 echo ""
 echo "=== Verification ==="
 systemd-sysext status || true

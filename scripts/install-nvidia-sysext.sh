@@ -14,11 +14,13 @@
 # newest matching one.
 #
 # Override with --release=TAG (specific tag) or --sysext=PATH (local file).
-# Use --check to probe an existing install without making changes.
+# Use --check to probe an existing install, or --dry-run to walk through
+# the install without making changes.
 #
 # Usage:
 #   sudo ./install-nvidia-sysext.sh                                 # auto-detect + install
 #   sudo ./install-nvidia-sysext.sh --check                         # read-only status probe
+#   sudo ./install-nvidia-sysext.sh --dry-run                       # validate URLs/sysext, skip mutations
 #   sudo ./install-nvidia-sysext.sh --release=v25.10.3.1-nvidia580.126.18-r5
 #   sudo ./install-nvidia-sysext.sh --sysext=/tmp/x.raw             # local file
 #   sudo ./install-nvidia-sysext.sh --pool=fast
@@ -36,6 +38,11 @@
 #                          version match (sysext vs nvidia-smi), persist dir,
 #                          stock backup, PREINIT helper + middleware registration,
 #                          configure-mig availability. Exits 1 if anything fails.
+#   --dry-run              Validate every read/network step (release lookup,
+#                          download, sysext content sanity) but skip every
+#                          command that would mutate the running system.
+#                          Each skipped mutation is logged as `[dry-run] would: ...`.
+#                          Mutually exclusive with --check.
 #   -h, --help             Show this help and exit
 #
 # Pool selection priority: --persist-path > --pool > existing config dir > only
@@ -59,6 +66,7 @@ POOL_NAME=""
 PERSIST_PATH=""
 SKIP_BACKUP_CHECK=false
 CHECK_MODE=false
+DRY_RUN=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -68,10 +76,28 @@ for arg in "$@"; do
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         --skip-backup-check) SKIP_BACKUP_CHECK=true ;;
         --check) CHECK_MODE=true ;;
-        -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --dry-run) DRY_RUN=true ;;
+        -h|--help) sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
+
+if $CHECK_MODE && $DRY_RUN; then
+    echo "ERROR: --check and --dry-run are mutually exclusive" >&2
+    exit 2
+fi
+
+# Run a command in real mode; print `[dry-run] would: …` in dry-run mode.
+# For redirections, heredocs, or compound shell logic, gate manually with
+# `if $DRY_RUN; then ... else ... fi` since the shell evaluates redirections
+# before any wrapper sees them.
+if_real() {
+    if $DRY_RUN; then
+        printf '[dry-run] would: %s\n' "$*"
+    else
+        "$@"
+    fi
+}
 
 resolve_release_tag() {
     # Returns the release tag on stdout.
@@ -357,7 +383,7 @@ if $CHECK_MODE; then
 fi
 
 resolve_persist_dir || exit 1
-mkdir -p "$PERSIST_DIR"
+if_real mkdir -p "$PERSIST_DIR"
 
 # --- Pre-flight: stock backup required so user can recover from a bad swap ---
 if ! $SKIP_BACKUP_CHECK; then
@@ -401,14 +427,17 @@ echo "Persist dir: $PERSIST_DIR"
 echo ""
 
 # --- Stash to persistent storage so TrueNAS updates can be survived ---
-cp "$SYSEXT_SRC" "${PERSIST_DIR}/nvidia.raw"
-echo "Copied custom nvidia.raw to ${PERSIST_DIR}/nvidia.raw"
+if_real cp "$SYSEXT_SRC" "${PERSIST_DIR}/nvidia.raw"
+$DRY_RUN || echo "Copied custom nvidia.raw to ${PERSIST_DIR}/nvidia.raw"
 
 # --- Stage PREINIT helper BEFORE any system mutations ---
 # If the download fails (e.g. transient network issue), we want it to fail
 # NOW — not after Docker is stopped and nvidia.raw has been swapped, which
 # would leave the box half-installed. Fetched from main (durable), not the
 # refactor branch (deleted post-merge).
+#
+# Under --dry-run, we still validate the URL is reachable (download to a
+# tmpfile) but don't place anything in PERSIST_DIR.
 SCRIPT_URL_BASE="https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts"
 PREINIT_LOCAL="${PERSIST_DIR}/nvidia-preinit-full.sh"
 # Use `${BASH_SOURCE[0]:-}` (not bare ${BASH_SOURCE[0]}) so the curl|bash
@@ -418,24 +447,37 @@ PREINIT_LOCAL="${PERSIST_DIR}/nvidia-preinit-full.sh"
 # With the default-empty, SCRIPT_DIR ends up empty silently and the
 # branch below falls through to the download path.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd 2>/dev/null || true)"
+if $DRY_RUN; then
+    PREINIT_STAGE=$(mktemp -t nvidia-preinit-full.XXXXXX.sh)
+    trap '[ -n "${SYSEXT_SRC:-}" ] && rm -f "$SYSEXT_SRC"; rm -f "$PREINIT_STAGE"' EXIT
+else
+    PREINIT_STAGE="$PREINIT_LOCAL"
+fi
 if [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/nvidia-preinit-full.sh" ]; then
-    cp "${SCRIPT_DIR}/nvidia-preinit-full.sh" "$PREINIT_LOCAL"
+    cp "${SCRIPT_DIR}/nvidia-preinit-full.sh" "$PREINIT_STAGE"
     echo "Staged PREINIT helper from local checkout"
 else
     echo "Downloading PREINIT helper from ${SCRIPT_URL_BASE}/nvidia-preinit-full.sh"
-    curl -fL --retry 3 -o "$PREINIT_LOCAL" "${SCRIPT_URL_BASE}/nvidia-preinit-full.sh" \
+    curl -fL --retry 3 -o "$PREINIT_STAGE" "${SCRIPT_URL_BASE}/nvidia-preinit-full.sh" \
         || { echo "ERROR: failed to download PREINIT helper — aborting BEFORE system changes" >&2; exit 1; }
 fi
-chmod 0755 "$PREINIT_LOCAL"
-echo "Staged: $PREINIT_LOCAL"
+if $DRY_RUN; then
+    [ -s "$PREINIT_STAGE" ] || { echo "ERROR: PREINIT helper downloaded empty" >&2; exit 1; }
+    echo "[dry-run] would: install staged preinit to ${PREINIT_LOCAL} (chmod 0755)"
+else
+    chmod 0755 "$PREINIT_LOCAL"
+    echo "Staged: $PREINIT_LOCAL"
+fi
 
 # --- Stop Docker so the GPU is free, wait for processes to drain ---
 echo ""
 echo "Stopping Docker (releasing GPU)..."
-midclt call docker.update '{"nvidia": false}' >/dev/null \
+if_real midclt call docker.update '{"nvidia": false}' >/dev/null \
     || echo "WARN: docker.update failed (middleware may be transitionally down — continuing)"
 
-if [ -x /usr/bin/nvidia-smi ]; then
+if $DRY_RUN; then
+    echo "[dry-run] would: wait up to 120s for running GPU processes to drain"
+elif [ -x /usr/bin/nvidia-smi ]; then
     for attempt in $(seq 1 24); do
         N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
         if [ "${N:-0}" -eq 0 ]; then
@@ -449,31 +491,33 @@ fi
 
 # --- Swap nvidia.raw ---
 echo "Unmerging sysext..."
-systemd-sysext unmerge
+if_real systemd-sysext unmerge
 
 USR_DATASET=$(zfs list -H -o name /usr 2>/dev/null)
-echo "Setting $USR_DATASET writable..."
-zfs set readonly=off "$USR_DATASET"
+echo "Setting ${USR_DATASET:-<unknown>} writable..."
+if_real zfs set readonly=off "$USR_DATASET"
 
 # Stash current (likely stock) as .bak unless we already have nvidia-original.raw
-if [ ! -f "${LIVE_NVIDIA}.bak" ]; then
+if $DRY_RUN; then
+    echo "[dry-run] would: cp ${LIVE_NVIDIA} ${LIVE_NVIDIA}.bak (unless .bak already present)"
+elif [ ! -f "${LIVE_NVIDIA}.bak" ]; then
     cp "$LIVE_NVIDIA" "${LIVE_NVIDIA}.bak" 2>/dev/null \
         && echo "Backed up current to ${LIVE_NVIDIA}.bak" \
         || echo "WARN: could not back up to .bak"
 fi
 
-cp "$SYSEXT_SRC" "$LIVE_NVIDIA"
-echo "Installed custom nvidia.raw"
+if_real cp "$SYSEXT_SRC" "$LIVE_NVIDIA"
+$DRY_RUN || echo "Installed custom nvidia.raw"
 
-zfs set readonly=on "$USR_DATASET"
+if_real zfs set readonly=on "$USR_DATASET"
 
 echo "Ensuring /etc/extensions/nvidia.raw symlink..."
-mkdir -p /etc/extensions
-ln -sf "$LIVE_NVIDIA" /etc/extensions/nvidia.raw
+if_real mkdir -p /etc/extensions
+if_real ln -sf "$LIVE_NVIDIA" /etc/extensions/nvidia.raw
 
 echo "Re-merging sysext..."
-systemd-sysext merge
-systemctl daemon-reload
+if_real systemd-sysext merge
+if_real systemctl daemon-reload
 
 # --- Register the (already-staged) PREINIT helper with midclt ---
 echo ""
@@ -495,7 +539,13 @@ except Exception:
 
 JSON="{\"type\": \"COMMAND\", \"command\": \"${PREINIT_CMD}\", \"when\": \"PREINIT\", \"enabled\": true, \"timeout\": 180, \"comment\": \"${COMMENT}\"}"
 
-if [ -n "$EXISTING_ID" ]; then
+if $DRY_RUN; then
+    if [ -n "$EXISTING_ID" ]; then
+        echo "[dry-run] would: midclt call initshutdownscript.update ${EXISTING_ID} '${JSON}'"
+    else
+        echo "[dry-run] would: midclt call initshutdownscript.create '${JSON}'"
+    fi
+elif [ -n "$EXISTING_ID" ]; then
     echo "Updating existing PREINIT entry (id $EXISTING_ID)..."
     midclt call initshutdownscript.update "$EXISTING_ID" "$JSON" >/dev/null \
         || echo "WARN: PREINIT update failed"
@@ -508,11 +558,21 @@ fi
 # --- Re-enable Docker ---
 echo ""
 echo "Re-enabling Docker..."
-midclt call docker.update '{"nvidia": true}' >/dev/null || echo "WARN: docker.update re-enable failed"
+if_real midclt call docker.update '{"nvidia": true}' >/dev/null \
+    || echo "WARN: docker.update re-enable failed"
 
 echo ""
-echo "=== Install complete ==="
-cat <<EOF
+if $DRY_RUN; then
+    echo "=== Dry-run complete; no system changes applied ==="
+    echo ""
+    echo "Every download and sanity check ran for real (URL reachability,"
+    echo "sysext content validation, midclt query). Every mutation was"
+    echo "logged as '[dry-run] would: ...' but not executed."
+    echo ""
+    echo "Re-run without --dry-run to apply."
+else
+    echo "=== Install complete ==="
+    cat <<EOF
 
 REBOOT REQUIRED. The kernel modules currently loaded are the previous
 driver's; userspace libraries are now the new driver's. Until you reboot:
@@ -537,3 +597,4 @@ is available locally (bundled in the sysext) at /usr/bin/configure-mig:
 It writes mig.conf, runs the MIG service, and walks you through
 assigning MIG devices to your TrueNAS apps.
 EOF
+fi
