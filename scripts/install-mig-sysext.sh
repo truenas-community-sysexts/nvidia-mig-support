@@ -15,9 +15,11 @@
 # the newest matching one.
 #
 # Override with --release=TAG (specific tag) or --sysext=PATH (local file).
+# Use --check to probe an existing install without making changes.
 #
 # Usage:
-#   sudo ./install-mig-sysext.sh                              # auto-detect
+#   sudo ./install-mig-sysext.sh                              # auto-detect + install
+#   sudo ./install-mig-sysext.sh --check                      # read-only status probe
 #   sudo ./install-mig-sysext.sh --release=v25.10.3.1-mig-r5
 #   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw # local file
 #   sudo ./install-mig-sysext.sh --pool=fast
@@ -29,6 +31,11 @@
 #   --persist-path=PATH   Exact directory for persistent storage (overrides --pool)
 #   --force               Bypass the stock-driver-version pre-flight check
 #                         (refuses on stock driver major <570 without --force)
+#   --check               Read-only probe of an existing install. Reports the
+#                         state of: stock driver merged + version, MIG sysext
+#                         file/symlink/merge, persist dir, mig.conf, PREINIT
+#                         registration, nvidia-mig-setup.service status.
+#                         Exits 1 if anything fails.
 #   -h, --help            Show this help and exit
 #
 # Pool selection priority: --persist-path > --pool > existing config dir > only
@@ -49,6 +56,7 @@ RELEASE_TAG=""
 POOL_NAME=""
 PERSIST_PATH=""
 FORCE=false
+CHECK_MODE=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -57,8 +65,9 @@ for arg in "$@"; do
         --pool=*) POOL_NAME="${arg#*=}" ;;
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         --force) FORCE=true ;;
+        --check) CHECK_MODE=true ;;
         -h|--help)
-            sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
@@ -122,47 +131,54 @@ fi
 # --- Pre-flight: detect stock nvidia driver version inside the sysext on disk ---
 # Doesn't require the driver to be loaded; reads the version directly from
 # filenames inside /usr/share/truenas/sysext-extensions/nvidia.raw.
-command -v unsquashfs >/dev/null 2>&1 || { echo "ERROR: unsquashfs not found (squashfs-tools)" >&2; exit 1; }
+# Skipped under --check (do_check reports the same info as a check item
+# instead of hard-exiting on missing stock).
+if ! $CHECK_MODE; then
+    command -v unsquashfs >/dev/null 2>&1 || { echo "ERROR: unsquashfs not found (squashfs-tools)" >&2; exit 1; }
 
-if [ ! -f "$STOCK_NVIDIA" ]; then
-    echo "ERROR: $STOCK_NVIDIA not found — TrueNAS doesn't appear to have an NVIDIA sysext." >&2
-    echo "       The lightweight nvidia-mig sysext depends on the stock driver being present." >&2
-    exit 1
-fi
+    if [ ! -f "$STOCK_NVIDIA" ]; then
+        echo "ERROR: $STOCK_NVIDIA not found — TrueNAS doesn't appear to have an NVIDIA sysext." >&2
+        echo "       The lightweight nvidia-mig sysext depends on the stock driver being present." >&2
+        exit 1
+    fi
 
-DRIVER_VER=$(unsquashfs -l "$STOCK_NVIDIA" 2>/dev/null \
-    | grep -oE 'libnvidia-ml\.so\.[0-9]+\.[0-9]+\.[0-9]+' \
-    | head -1 \
-    | sed 's/^libnvidia-ml\.so\.//' || true)
+    DRIVER_VER=$(unsquashfs -l "$STOCK_NVIDIA" 2>/dev/null \
+        | grep -oE 'libnvidia-ml\.so\.[0-9]+\.[0-9]+\.[0-9]+' \
+        | head -1 \
+        | sed 's/^libnvidia-ml\.so\.//' || true)
 
-if [ -z "$DRIVER_VER" ]; then
-    echo "WARN: could not detect driver version inside $STOCK_NVIDIA — proceeding (no support gate)."
-else
-    DRIVER_MAJOR=${DRIVER_VER%%.*}
-    echo "Stock NVIDIA driver in $STOCK_NVIDIA: $DRIVER_VER"
-    if [ "$DRIVER_MAJOR" -lt "$MIN_DRIVER_MAJOR" ]; then
-        echo "" >&2
-        echo "ERROR: stock driver $DRIVER_VER is below the minimum-validated $MIN_DRIVER_MAJOR.x." >&2
-        echo "       MIG support has only been validated on $MIN_DRIVER_MAJOR.x and above on Blackwell GPUs." >&2
-        echo "       Re-run with --force to bypass this check at your own risk." >&2
-        $FORCE || exit 1
-        echo "       --force given, continuing anyway." >&2
+    if [ -z "$DRIVER_VER" ]; then
+        echo "WARN: could not detect driver version inside $STOCK_NVIDIA — proceeding (no support gate)."
+    else
+        DRIVER_MAJOR=${DRIVER_VER%%.*}
+        echo "Stock NVIDIA driver in $STOCK_NVIDIA: $DRIVER_VER"
+        if [ "$DRIVER_MAJOR" -lt "$MIN_DRIVER_MAJOR" ]; then
+            echo "" >&2
+            echo "ERROR: stock driver $DRIVER_VER is below the minimum-validated $MIN_DRIVER_MAJOR.x." >&2
+            echo "       MIG support has only been validated on $MIN_DRIVER_MAJOR.x and above on Blackwell GPUs." >&2
+            echo "       Re-run with --force to bypass this check at your own risk." >&2
+            $FORCE || exit 1
+            echo "       --force given, continuing anyway." >&2
+        fi
     fi
 fi
 
 # If no source given, fetch from the resolved release.
-if [ -z "$SYSEXT_SRC" ]; then
-    SYSEXT_SRC=$(mktemp -t nvidia-mig.raw.XXXXXX)
-    trap 'rm -f "$SYSEXT_SRC"' EXIT
-    RESOLVED_TAG=$(resolve_release_tag)
-    RELEASE_URL="https://github.com/${REPO}/releases/download/${RESOLVED_TAG}/${ASSET}"
-    echo "Downloading ${RELEASE_URL}"
-    curl -fL --retry 3 -o "$SYSEXT_SRC" "$RELEASE_URL"
-fi
+# Skipped under --check (no install happens; nothing to download).
+if ! $CHECK_MODE; then
+    if [ -z "$SYSEXT_SRC" ]; then
+        SYSEXT_SRC=$(mktemp -t nvidia-mig.raw.XXXXXX)
+        trap 'rm -f "$SYSEXT_SRC"' EXIT
+        RESOLVED_TAG=$(resolve_release_tag)
+        RELEASE_URL="https://github.com/${REPO}/releases/download/${RESOLVED_TAG}/${ASSET}"
+        echo "Downloading ${RELEASE_URL}"
+        curl -fL --retry 3 -o "$SYSEXT_SRC" "$RELEASE_URL"
+    fi
 
-if [ ! -f "$SYSEXT_SRC" ]; then
-    echo "ERROR: sysext source $SYSEXT_SRC does not exist" >&2
-    exit 1
+    if [ ! -f "$SYSEXT_SRC" ]; then
+        echo "ERROR: sysext source $SYSEXT_SRC does not exist" >&2
+        exit 1
+    fi
 fi
 
 # --- Resolve persistent storage location ---
@@ -252,6 +268,179 @@ resolve_persist_dir() {
         echo "  Invalid. Enter 1-${#choices[@]}."
     done
 }
+do_check() {
+    # Read-only probe of an existing MIG sysext install. Reports pass/warn/fail.
+    # Returns 0 if all checks pass (warnings allowed), 1 if anything failed.
+    local pass=0 warn=0 fail=0
+    local mark_ok="OK" mark_warn="--" mark_fail="!!"
+    local -a status_lines=() hint_lines=()
+
+    record_pass() { status_lines+=("  [${mark_ok}] $1"); pass=$((pass+1)); }
+    record_warn() {
+        status_lines+=("  [${mark_warn}] $1"); warn=$((warn+1))
+        [ -n "${2:-}" ] && hint_lines+=("       → $2")
+    }
+    record_fail() {
+        status_lines+=("  [${mark_fail}] $1"); fail=$((fail+1))
+        [ -n "${2:-}" ] && hint_lines+=("       → $2")
+    }
+
+    echo "=== MIG sysext install status ==="
+    echo ""
+
+    # Stock NVIDIA driver merged (prereq for MIG)
+    if systemd-sysext list 2>/dev/null | awk '{print $1}' | grep -qx nvidia; then
+        record_pass "Stock 'nvidia' sysext merged (prereq for MIG sysext)"
+    else
+        record_fail "Stock 'nvidia' sysext not merged" \
+            "MIG sysext layers on the stock driver — without it, MIG can't load"
+    fi
+
+    # Stock driver version >= MIN_DRIVER_MAJOR (570)
+    local stock_drv="" stock_major=""
+    if command -v unsquashfs >/dev/null 2>&1 && [ -f "$STOCK_NVIDIA" ]; then
+        stock_drv=$(unsquashfs -l "$STOCK_NVIDIA" 2>/dev/null \
+            | grep -oE 'libnvidia-ml\.so\.[0-9]+\.[0-9]+\.[0-9]+' \
+            | head -1 | sed 's/^libnvidia-ml\.so\.//' || true)
+    fi
+    if [ -n "$stock_drv" ]; then
+        stock_major=${stock_drv%%.*}
+        if [ "$stock_major" -ge "$MIN_DRIVER_MAJOR" ]; then
+            record_pass "Stock driver ${stock_drv} >= minimum ${MIN_DRIVER_MAJOR}.x"
+        else
+            record_fail "Stock driver ${stock_drv} < ${MIN_DRIVER_MAJOR}.x (MIG validated only on >= ${MIN_DRIVER_MAJOR}.x)" \
+                "wait for TrueNAS to ship a newer driver, or install the full-driver sysext"
+        fi
+    else
+        record_warn "Could not detect stock driver version in ${STOCK_NVIDIA}" \
+            "unsquashfs missing or sysext file unreadable"
+    fi
+
+    # MIG sysext file on persist dir
+    if [ -n "${PERSIST_DIR:-}" ] && [ -f "${PERSIST_DIR}/nvidia-mig.raw" ]; then
+        record_pass "MIG sysext present at ${PERSIST_DIR}/nvidia-mig.raw"
+    elif [ -n "${PERSIST_DIR:-}" ]; then
+        record_fail "MIG sysext missing at ${PERSIST_DIR}/nvidia-mig.raw" \
+            "re-run install-mig-sysext.sh"
+    fi
+
+    # /etc/extensions/ symlink
+    if [ -L /etc/extensions/nvidia-mig.raw ]; then
+        local target
+        target=$(readlink -f /etc/extensions/nvidia-mig.raw 2>/dev/null || true)
+        if [ -n "$target" ] && [ -f "$target" ]; then
+            record_pass "/etc/extensions/nvidia-mig.raw symlink resolves to ${target}"
+        else
+            record_fail "/etc/extensions/nvidia-mig.raw symlink dangling (target missing)" \
+                "re-run install — persistent copy was removed"
+        fi
+    elif [ -f /etc/extensions/nvidia-mig.raw ]; then
+        record_warn "/etc/extensions/nvidia-mig.raw is a regular file, not a symlink" \
+            "install creates a symlink to the persistent copy — re-run install"
+    else
+        record_fail "/etc/extensions/nvidia-mig.raw missing" \
+            "re-run install"
+    fi
+
+    # MIG sysext merged
+    if systemd-sysext list 2>/dev/null | awk '{print $1}' | grep -qx nvidia-mig; then
+        record_pass "MIG sysext 'nvidia-mig' merged into /usr"
+    else
+        record_fail "MIG sysext 'nvidia-mig' not currently merged" \
+            "check 'systemctl status systemd-sysext' or re-run install"
+    fi
+
+    # Persist dir
+    if [ -n "${PERSIST_DIR:-}" ] && [ -d "${PERSIST_DIR}" ]; then
+        record_pass "Persistent config at ${PERSIST_DIR}"
+    else
+        record_fail "No persistent config under /mnt/*/.config/nvidia-gpu/" \
+            "re-run install with --pool=NAME or --persist-path=PATH"
+    fi
+
+    # mig.conf (optional — only present if user ran configure-mig)
+    if [ -n "${PERSIST_DIR:-}" ] && [ -f "${PERSIST_DIR}/mig.conf" ]; then
+        record_pass "MIG profile config at ${PERSIST_DIR}/mig.conf"
+    elif [ -n "${PERSIST_DIR:-}" ]; then
+        record_warn "No ${PERSIST_DIR}/mig.conf yet" \
+            "run 'sudo configure-mig' to set up MIG profiles"
+    fi
+
+    # PREINIT registered with TrueNAS middleware
+    if command -v midclt >/dev/null 2>&1; then
+        local entry
+        entry=$(midclt call initshutdownscript.query 2>/dev/null \
+            | python3 -c "
+import sys, json
+try:
+    for s in json.load(sys.stdin):
+        haystack = (s.get('command') or '') + ' ' + (s.get('script') or '')
+        if 'nvidia-mig-setup' in haystack or 'nvidia-preinit-full' in haystack:
+            print(f\"{s.get('when','?')}|{s.get('enabled','?')}\")
+            break
+except Exception:
+    pass" 2>/dev/null || true)
+        if [ -z "$entry" ]; then
+            record_fail "No PREINIT entry registered for nvidia-mig-setup" \
+                "re-run install — middleware registration missing"
+        else
+            local when enabled
+            IFS='|' read -r when enabled <<<"$entry"
+            if [ "$when" = "PREINIT" ] && [ "$enabled" = "True" ]; then
+                record_pass "PREINIT registered with TrueNAS middleware (PREINIT, enabled)"
+            else
+                record_warn "PREINIT entry exists but state is when=${when}, enabled=${enabled}" \
+                    "re-run install to normalize"
+            fi
+        fi
+    else
+        record_warn "midclt not available — skipping middleware check" \
+            "this script must run on TrueNAS SCALE"
+    fi
+
+    # nvidia-mig-setup.service status (reports current state regardless)
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files nvidia-mig-setup.service >/dev/null 2>&1; then
+        local svc_state
+        svc_state=$(systemctl is-active nvidia-mig-setup.service 2>/dev/null || true)
+        case "$svc_state" in
+            active)
+                record_pass "nvidia-mig-setup.service active"
+                ;;
+            inactive)
+                record_warn "nvidia-mig-setup.service inactive" \
+                    "service is oneshot — inactive after successful run is normal; check 'systemctl status' for details"
+                ;;
+            failed)
+                record_fail "nvidia-mig-setup.service failed" \
+                    "run 'journalctl -u nvidia-mig-setup.service -b' to investigate"
+                ;;
+            *)
+                record_warn "nvidia-mig-setup.service state: ${svc_state:-unknown}"
+                ;;
+        esac
+    else
+        record_warn "nvidia-mig-setup.service not found" \
+            "MIG sysext provides this unit — it may not be merged"
+    fi
+
+    echo "Checks: ${pass} pass, ${warn} warn, ${fail} fail"
+    echo ""
+    printf '%s\n' "${status_lines[@]}"
+    if [ "${#hint_lines[@]}" -gt 0 ]; then
+        echo ""
+        printf '%s\n' "${hint_lines[@]}"
+    fi
+    [ "$fail" -eq 0 ]
+}
+
+# Resolve persist dir up front. In --check mode, swallow errors and continue
+# with PERSIST_DIR="" so the check can still report all other items.
+if $CHECK_MODE; then
+    resolve_persist_dir 2>/dev/null || PERSIST_DIR=""
+    do_check
+    exit $?
+fi
+
 resolve_persist_dir || exit 1
 
 echo "=== Install nvidia-mig sysext ==="
