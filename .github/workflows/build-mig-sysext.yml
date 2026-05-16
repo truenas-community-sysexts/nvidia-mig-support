@@ -132,11 +132,15 @@ jobs:
           cat > release-notes.md <<EOF
           Lightweight MIG sysext. Pairs with TrueNAS stock nvidia.raw (driver >= 570).
 
+          **Variant: standalone MIG.** Layers MIG tooling on top of TrueNAS's stock NVIDIA driver. Do **not** install alongside a \`v<truenas>-nvidia<driver>-r<run>\` release built with \`bundle_mig=true\` (the default) — that release already provides MIG tooling and running both causes undefined sysext-merge ordering.
+
           - TrueNAS:       \`${TRUENAS_VERSION}\`
           - Run number:    ${RUN_NUMBER}
           - Source commit: \`${COMMIT_SHA}\`
 
           Install: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash\`
+
+          See [docs/build-ci-notes.md](https://github.com/${{ github.repository }}/blob/main/docs/build-ci-notes.md#mig-packaging-bundled-vs-standalone) for the bundled-vs-standalone tradeoffs.
           EOF
 
       - name: Publish release

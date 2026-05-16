@@ -236,8 +236,18 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
+          # MIG-bundling banner: prominent variant label at the top of the
+          # release page so consumers immediately know whether this artifact
+          # provides MIG tooling or requires the separate nvidia-mig.raw.
+          if [ "$BUNDLE_MIG" = "true" ]; then
+            MIG_BANNER='**Variant: full driver + bundled MIG tooling.** No separate `nvidia-mig.raw` needed — `configure-mig` + `nvidia-mig-setup.service` ship inside this sysext.'
+          else
+            MIG_BANNER='**Variant: full driver, no MIG tooling.** Install the matching `v<truenas>-mig-r<run>` release alongside if you need MIG.'
+          fi
           cat > release-notes.md <<EOF
           Full-driver nvidia.raw sysext.
+
+          ${MIG_BANNER}
 
           - Driver:        \`${NVIDIA_VERSION}\` (${KERNEL_MODULE_TYPE} module)
           - TrueNAS:       \`${TRUENAS_VERSION}\`
@@ -246,6 +256,8 @@ jobs:
           - Source commit: \`${COMMIT_SHA}\`
 
           Install: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-nvidia-sysext.sh | sudo bash\`
+
+          See [docs/build-ci-notes.md](https://github.com/${{ github.repository }}/blob/main/docs/build-ci-notes.md#mig-packaging-bundled-vs-standalone) for the bundled-vs-standalone tradeoffs.
           EOF
 
       - name: Publish release
