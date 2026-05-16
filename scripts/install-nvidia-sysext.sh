@@ -412,10 +412,23 @@ fi
 [ -f "$SYSEXT_SRC" ] || { echo "ERROR: sysext source not found: $SYSEXT_SRC" >&2; exit 1; }
 
 # --- Sanity-check the sysext contents ---
+# Capture the listing into a variable BEFORE grepping. The previous form
+# `unsquashfs -l ... | grep -q PATTERN` is broken under `set -o pipefail`:
+# grep -q exits as soon as it finds the first match, which SIGPIPEs the
+# still-running unsquashfs, the pipeline's exit is then 141, pipefail
+# propagates non-zero, and the `||` block falsely fires "missing
+# extension-release.nvidia" even when the file IS present. Buffering the
+# listing first eliminates the live pipe to grep entirely.
 if command -v unsquashfs >/dev/null 2>&1; then
-    unsquashfs -l "$SYSEXT_SRC" 2>/dev/null | grep -q 'extension-release.nvidia$' \
-        || { echo "ERROR: $SYSEXT_SRC missing extension-release.nvidia" >&2; exit 1; }
-    NEW_DRIVER=$(unsquashfs -l "$SYSEXT_SRC" 2>/dev/null \
+    if ! SYSEXT_LISTING=$(unsquashfs -l "$SYSEXT_SRC" 2>/dev/null); then
+        echo "ERROR: unsquashfs -l failed on $SYSEXT_SRC" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$SYSEXT_LISTING" | grep -q 'extension-release.nvidia$'; then
+        echo "ERROR: $SYSEXT_SRC missing extension-release.nvidia" >&2
+        exit 1
+    fi
+    NEW_DRIVER=$(printf '%s\n' "$SYSEXT_LISTING" \
         | grep -oE 'libnvidia-ml\.so\.[0-9]+\.[0-9]+\.[0-9]+' \
         | head -1 | sed 's/^libnvidia-ml\.so\.//' || true)
     echo "Sysext driver version: ${NEW_DRIVER:-unknown}"
