@@ -1,5 +1,7 @@
 # Refactor history: from scale-build to dual-sysext
 
+> **Frozen snapshot.** This document captures the state of the project at the *end of the scale-build → dual-sysext refactor* (pre-org-move). Subsequent CI/install changes — immutable `v<truenas>-…-r<run>` release tags, `check-releases.yml` daily auto-cadence, the hardware-test gate, install-script flag set (`--check` / `--dry-run` / `--release=TAG`), and preinit hardening — are tracked in [CHANGELOG.md](../CHANGELOG.md) and [build-ci-notes.md](build-ci-notes.md). In particular, the "rolling `dev-{nvidia,mig}-sysext` release" mentioned in the table below was retired in favor of immutable per-run tags.
+
 This refactor replaced a 5–6 hour [scale-build](https://github.com/truenas/scale-build) pipeline with two thin sysext build flows: a tiny lightweight MIG-only sysext (default) and an optional full-driver sysext (a native GitHub Actions runner port of [biohazardious/truenas-nvidia-driver-updater](https://github.com/biohazardious/truenas-nvidia-driver-updater), no Docker). Validated end-to-end on hardware (TrueNAS 25.10.3.1 + RTX PRO 6000 Blackwell).
 
 For day-to-day reference see [architecture.md](architecture.md) and [mig-persistence.md](mig-persistence.md). This doc is the design history — useful if you want to know *why* things ended up shaped the way they did.
