@@ -14,9 +14,11 @@
 # newest matching one.
 #
 # Override with --release=TAG (specific tag) or --sysext=PATH (local file).
+# Use --check to probe an existing install without making changes.
 #
 # Usage:
-#   sudo ./install-nvidia-sysext.sh                                 # auto-detect
+#   sudo ./install-nvidia-sysext.sh                                 # auto-detect + install
+#   sudo ./install-nvidia-sysext.sh --check                         # read-only status probe
 #   sudo ./install-nvidia-sysext.sh --release=v25.10.3.1-nvidia580.126.18-r5
 #   sudo ./install-nvidia-sysext.sh --sysext=/tmp/x.raw             # local file
 #   sudo ./install-nvidia-sysext.sh --pool=fast
@@ -29,6 +31,11 @@
 #   --skip-backup-check    Don't refuse if nvidia-original.raw backup is missing
 #                          (use at your own risk — you may be unable to recover
 #                          the stock driver later)
+#   --check                Read-only probe of an existing install. Reports the
+#                          state of: sysext file/merge, kernel module, driver
+#                          version match (sysext vs nvidia-smi), persist dir,
+#                          stock backup, PREINIT helper + middleware registration,
+#                          configure-mig availability. Exits 1 if anything fails.
 #   -h, --help             Show this help and exit
 #
 # Pool selection priority: --persist-path > --pool > existing config dir > only
@@ -51,6 +58,7 @@ RELEASE_TAG=""
 POOL_NAME=""
 PERSIST_PATH=""
 SKIP_BACKUP_CHECK=false
+CHECK_MODE=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -59,7 +67,8 @@ for arg in "$@"; do
         --pool=*) POOL_NAME="${arg#*=}" ;;
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
         --skip-backup-check) SKIP_BACKUP_CHECK=true ;;
-        -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --check) CHECK_MODE=true ;;
+        -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
@@ -195,6 +204,158 @@ resolve_persist_dir() {
         echo "  Invalid. Enter 1-${#choices[@]}."
     done
 }
+do_check() {
+    # Read-only probe of an existing install. Reports pass/warn/fail per check.
+    # Returns 0 if all checks pass (warnings allowed), 1 if anything failed.
+    local pass=0 warn=0 fail=0
+    local mark_ok="OK" mark_warn="--" mark_fail="!!"
+    local -a status_lines=() hint_lines=()
+
+    record_pass() { status_lines+=("  [${mark_ok}] $1"); pass=$((pass+1)); }
+    record_warn() {
+        status_lines+=("  [${mark_warn}] $1"); warn=$((warn+1))
+        [ -n "${2:-}" ] && hint_lines+=("       → $2")
+    }
+    record_fail() {
+        status_lines+=("  [${mark_fail}] $1"); fail=$((fail+1))
+        [ -n "${2:-}" ] && hint_lines+=("       → $2")
+    }
+
+    echo "=== Full-driver nvidia.raw install status ==="
+    echo ""
+
+    # Sysext file present
+    if [ -f "$LIVE_NVIDIA" ]; then
+        record_pass "Sysext file present at ${LIVE_NVIDIA}"
+    else
+        record_fail "Sysext file missing at ${LIVE_NVIDIA}" \
+            "re-run install-nvidia-sysext.sh"
+    fi
+
+    # Sysext merged into /usr
+    if systemd-sysext list 2>/dev/null | awk '{print $1}' | grep -qx nvidia; then
+        record_pass "Sysext 'nvidia' merged into /usr"
+    else
+        record_fail "Sysext 'nvidia' not currently merged" \
+            "check 'systemctl status systemd-sysext' or re-run install"
+    fi
+
+    # Kernel module loaded
+    if lsmod 2>/dev/null | awk '{print $1}' | grep -qx nvidia; then
+        record_pass "Kernel module 'nvidia' loaded"
+    else
+        record_fail "Kernel module 'nvidia' not loaded" \
+            "reboot — a fresh install can't load a new module while the old one is in use"
+    fi
+
+    # Driver version match (sysext libnvidia-ml vs nvidia-smi)
+    local sysext_drv="" runtime_drv=""
+    if command -v unsquashfs >/dev/null 2>&1 && [ -f "$LIVE_NVIDIA" ]; then
+        sysext_drv=$(unsquashfs -l "$LIVE_NVIDIA" 2>/dev/null \
+            | grep -oE 'libnvidia-ml\.so\.[0-9]+\.[0-9]+\.[0-9]+' \
+            | head -1 | sed 's/^libnvidia-ml\.so\.//' || true)
+    fi
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        runtime_drv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
+            | head -1 | tr -d '[:space:]' || true)
+    fi
+    if [ -n "$sysext_drv" ] && [ -n "$runtime_drv" ]; then
+        if [ "$sysext_drv" = "$runtime_drv" ]; then
+            record_pass "Driver versions match: sysext=${sysext_drv}, runtime=${runtime_drv}"
+        else
+            record_fail "Driver mismatch: sysext=${sysext_drv} but runtime=${runtime_drv}" \
+                "reboot to pick up the new kernel module from the sysext"
+        fi
+    elif [ -n "$sysext_drv" ]; then
+        record_warn "Sysext driver=${sysext_drv}; could not query nvidia-smi" \
+            "no GPU detected, or driver not loaded — reboot may be required"
+    else
+        record_warn "Could not read sysext driver version" \
+            "unsquashfs missing or sysext file unreadable"
+    fi
+
+    # Persist dir
+    if [ -n "${PERSIST_DIR:-}" ] && [ -d "${PERSIST_DIR}" ]; then
+        record_pass "Persistent config at ${PERSIST_DIR}"
+    else
+        record_fail "No persistent config under /mnt/*/.config/nvidia-gpu/" \
+            "re-run install with --pool=NAME or --persist-path=PATH"
+    fi
+
+    # Stock backup (warn not fail — install allows --skip-backup-check)
+    if [ -n "${PERSIST_DIR:-}" ] && [ -f "${PERSIST_DIR}/nvidia-original.raw" ]; then
+        record_pass "Stock backup ${PERSIST_DIR}/nvidia-original.raw present"
+    elif [ -n "${PERSIST_DIR:-}" ]; then
+        record_warn "No stock backup ${PERSIST_DIR}/nvidia-original.raw" \
+            "you may be unable to recover the stock driver — run recover-stock-nvidia.sh"
+    fi
+
+    # PREINIT helper staged
+    if [ -n "${PERSIST_DIR:-}" ] && [ -x "${PERSIST_DIR}/nvidia-preinit-full.sh" ]; then
+        record_pass "PREINIT helper ${PERSIST_DIR}/nvidia-preinit-full.sh staged and executable"
+    elif [ -n "${PERSIST_DIR:-}" ]; then
+        record_fail "PREINIT helper missing or not executable in ${PERSIST_DIR}" \
+            "re-run install"
+    fi
+
+    # PREINIT registered with TrueNAS middleware (mirrors install registration logic)
+    if command -v midclt >/dev/null 2>&1; then
+        local entry
+        entry=$(midclt call initshutdownscript.query 2>/dev/null \
+            | python3 -c "
+import sys, json
+try:
+    for s in json.load(sys.stdin):
+        haystack = (s.get('command') or '') + ' ' + (s.get('script') or '')
+        if 'nvidia-preinit-full' in haystack:
+            print(f\"{s.get('when','?')}|{s.get('enabled','?')}\")
+            break
+except Exception:
+    pass" 2>/dev/null || true)
+        if [ -z "$entry" ]; then
+            record_fail "No PREINIT entry registered for nvidia-preinit-full" \
+                "re-run install — middleware registration missing"
+        else
+            local when enabled
+            IFS='|' read -r when enabled <<<"$entry"
+            if [ "$when" = "PREINIT" ] && [ "$enabled" = "True" ]; then
+                record_pass "PREINIT registered with TrueNAS middleware (PREINIT, enabled)"
+            else
+                record_warn "PREINIT entry exists but state is when=${when}, enabled=${enabled}" \
+                    "re-run install to normalize"
+            fi
+        fi
+    else
+        record_warn "midclt not available — skipping middleware check" \
+            "this script must run on TrueNAS SCALE"
+    fi
+
+    # configure-mig command (bundled in sysext when BUNDLE_MIG=true)
+    if command -v configure-mig >/dev/null 2>&1; then
+        record_pass "configure-mig command available (bundled in sysext)"
+    else
+        record_warn "configure-mig command not found in PATH" \
+            "either BUNDLE_MIG=false at build time, or the sysext isn't currently merged"
+    fi
+
+    echo "Checks: ${pass} pass, ${warn} warn, ${fail} fail"
+    echo ""
+    printf '%s\n' "${status_lines[@]}"
+    if [ "${#hint_lines[@]}" -gt 0 ]; then
+        echo ""
+        printf '%s\n' "${hint_lines[@]}"
+    fi
+    [ "$fail" -eq 0 ]
+}
+
+# Resolve persist dir up front. In --check mode, swallow errors and continue
+# with PERSIST_DIR="" so the check can still report all other items.
+if $CHECK_MODE; then
+    resolve_persist_dir 2>/dev/null || PERSIST_DIR=""
+    do_check
+    exit $?
+fi
+
 resolve_persist_dir || exit 1
 mkdir -p "$PERSIST_DIR"
 
