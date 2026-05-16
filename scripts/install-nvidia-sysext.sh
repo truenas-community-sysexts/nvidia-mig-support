@@ -485,8 +485,14 @@ fi
 # --- Stop Docker so the GPU is free, wait for processes to drain ---
 echo ""
 echo "Stopping Docker (releasing GPU)..."
-if_real midclt call docker.update '{"nvidia": false}' >/dev/null \
-    || echo "WARN: docker.update failed (middleware may be transitionally down — continuing)"
+# Manual if/else (not if_real) because the trailing `>/dev/null` would
+# otherwise eat the `[dry-run] would: …` line that if_real prints.
+if $DRY_RUN; then
+    echo "[dry-run] would: midclt call docker.update '{\"nvidia\": false}'"
+else
+    midclt call docker.update '{"nvidia": false}' >/dev/null \
+        || echo "WARN: docker.update failed (middleware may be transitionally down — continuing)"
+fi
 
 if $DRY_RUN; then
     echo "[dry-run] would: wait up to 120s for running GPU processes to drain"
@@ -571,8 +577,12 @@ fi
 # --- Re-enable Docker ---
 echo ""
 echo "Re-enabling Docker..."
-if_real midclt call docker.update '{"nvidia": true}' >/dev/null \
-    || echo "WARN: docker.update re-enable failed"
+if $DRY_RUN; then
+    echo "[dry-run] would: midclt call docker.update '{\"nvidia\": true}'"
+else
+    midclt call docker.update '{"nvidia": true}' >/dev/null \
+        || echo "WARN: docker.update re-enable failed"
+fi
 
 echo ""
 if $DRY_RUN; then
