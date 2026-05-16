@@ -250,7 +250,13 @@ echo "Copied custom nvidia.raw to ${PERSIST_DIR}/nvidia.raw"
 # refactor branch (deleted post-merge).
 SCRIPT_URL_BASE="https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts"
 PREINIT_LOCAL="${PERSIST_DIR}/nvidia-preinit-full.sh"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
+# Use `${BASH_SOURCE[0]:-}` (not bare ${BASH_SOURCE[0]}) so the curl|bash
+# code path doesn't trip `set -u`: when read from stdin, BASH_SOURCE[0]
+# is unset, and a bare reference prints a noisy "unbound variable"
+# diagnostic before the surrounding `|| true` salvages the assignment.
+# With the default-empty, SCRIPT_DIR ends up empty silently and the
+# branch below falls through to the download path.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd 2>/dev/null || true)"
 if [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/nvidia-preinit-full.sh" ]; then
     cp "${SCRIPT_DIR}/nvidia-preinit-full.sh" "$PREINIT_LOCAL"
     echo "Staged PREINIT helper from local checkout"
