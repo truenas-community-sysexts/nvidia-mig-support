@@ -26,7 +26,7 @@ for arg in "$@"; do
     esac
 done
 
-[ "$(id -u)" -eq 0 ] || { echo "ERROR: must run as root" >&2; exit 1; }
+[ "$(id -u 2>/dev/null)" = "0" ] || { echo "ERROR: must run as root" >&2; exit 1; }
 
 SYSEXT_DIR="/usr/share/truenas/sysext-extensions"
 LIVE_NVIDIA="${SYSEXT_DIR}/nvidia.raw"

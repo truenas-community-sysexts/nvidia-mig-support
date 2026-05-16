@@ -22,7 +22,7 @@ for arg in "$@"; do
     esac
 done
 
-if [ "$(id -u)" -ne 0 ]; then
+if [ "$(id -u 2>/dev/null)" != "0" ]; then
     echo "ERROR: must run as root" >&2
     exit 1
 fi

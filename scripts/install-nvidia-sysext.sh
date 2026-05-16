@@ -122,7 +122,7 @@ except Exception:
     printf '%s\n' "$tag"
 }
 
-[ "$(id -u)" -eq 0 ] || { echo "ERROR: must run as root" >&2; exit 1; }
+[ "$(id -u 2>/dev/null)" = "0" ] || { echo "ERROR: must run as root" >&2; exit 1; }
 
 # --- Resolve persistent storage location ---
 # resolve_persist_dir is duplicated verbatim across install-mig-sysext.sh,
