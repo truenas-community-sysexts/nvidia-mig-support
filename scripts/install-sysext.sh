@@ -907,18 +907,70 @@ register_preinit "nvidia-mig-setup.service" \
     "Start nvidia-mig-setup service (MIG instance recreation)" \
     120
 
-# Intentionally NOT calling `midclt call docker.update '{"nvidia": true}'`
-# here. At this point in the --with-driver flow:
-#   - userspace libs in /usr are the new driver's (just cp'd and merged)
-#   - kernel modules in RAM are still the previous driver's
-#   - NVML reports "Driver/library version mismatch"
-# Recent TrueNAS middleware validates docker.update by probing NVML, so
-# the call gets silently rejected and persisted as nvidia=false — the
-# script has no way to detect that (errors swallowed by ||true) and the
-# user finds the Apps "Use NVIDIA GPU" toggle off after reboot. We defer
-# the re-enable to the user, with explicit instructions in the final
-# banner below. The first docker.update earlier ('{"nvidia": false}')
-# ran while NVML was still healthy, so it worked fine.
+# Attempt to re-enable Apps' NVIDIA toggle. We do query → set → verify
+# (rather than fire-and-forget) because at this point in the --with-driver
+# flow NVML is in driver/library mismatch (libs in /usr are the new
+# driver's, kernel modules in RAM are still the previous driver's). Recent
+# TrueNAS middleware validates docker.update against NVML and silently
+# rejects when probing fails, persisting nvidia=false. A blind call would
+# appear to succeed but actually leave the Apps toggle off after reboot.
+# Some TrueNAS versions DON'T validate, in which case the re-enable does
+# stick — so we try, then verify, and only warn if it didn't stick.
+#
+# (Inlined helper rather than sourced; uninstall-nvidia-sysext.sh has the
+# same function — keep these copies in sync.)
+NVIDIA_REENABLE_OK=false
+attempt_nvidia_reenable() {
+    if $DRY_RUN; then
+        echo "[dry-run] would: query docker.config, set nvidia=true if false, verify"
+        return 0
+    fi
+    if ! command -v midclt >/dev/null 2>&1; then
+        echo "  midclt not available — skipping app-services re-enable"
+        return 1
+    fi
+
+    local current
+    current=$(midclt call docker.config 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print('true' if d.get('nvidia') else 'false')
+except Exception:
+    pass" 2>/dev/null)
+
+    if [ "$current" = "true" ]; then
+        echo "  app services nvidia toggle already on — no change needed"
+        return 0
+    fi
+
+    midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+
+    local after
+    after=$(midclt call docker.config 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print('true' if d.get('nvidia') else 'false')
+except Exception:
+    pass" 2>/dev/null)
+
+    if [ "$after" = "true" ]; then
+        echo "  app services nvidia toggle re-enabled (verified)"
+        return 0
+    fi
+    return 1
+}
+
+if $WITH_DRIVER; then
+    echo ""
+    echo "Re-enabling Apps' NVIDIA toggle..."
+    if attempt_nvidia_reenable; then
+        NVIDIA_REENABLE_OK=true
+    fi
+fi
 
 # ─────────────────────────────────────────────────────────────────────────
 # Done. Mode-appropriate finishing messages.
@@ -987,12 +1039,21 @@ After reboot:
 
 Run: sudo reboot
 
+EOF
+        if $NVIDIA_REENABLE_OK; then
+            cat <<EOF
+Apps' NVIDIA toggle: already re-enabled and verified above (nothing
+extra to do after reboot for that).
+
+EOF
+        else
+            cat <<EOF
 >>> AFTER REBOOT — one-time step to make Apps see the GPU again <<<
 
 App services were turned off during install (so we could swap the
-driver). The matching re-enable was deliberately skipped because
-TrueNAS's middleware validates that call against NVML, which is in
-"driver/library mismatch" right now — the call would silently fail.
+driver). Auto re-enable was attempted but did NOT stick — TrueNAS
+middleware likely validated the call against NVML, which is in
+"driver/library mismatch" right now, so it rejected.
 
 Once the box is back up and 'nvidia-smi' shows the new driver, run:
 
@@ -1003,6 +1064,9 @@ Once the box is back up and 'nvidia-smi' shows the new driver, run:
   Toggle the "Use NVIDIA GPU" switch on under TrueNAS UI →
   Apps → Settings → Configure → check 'Use NVIDIA GPU' → Save
 
+EOF
+        fi
+        cat <<EOF
 DO NOT run configure-mig before rebooting — it will refuse with a
 driver/library-mismatch error. After the box is back up:
 

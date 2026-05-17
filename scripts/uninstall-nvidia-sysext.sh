@@ -116,17 +116,59 @@ if ! $KEEP_PERSIST && [ -n "$PERSIST_DIR" ]; then
     echo "  (nvidia-original.raw and nvidia-mig.raw kept — MIG sysext still works on stock driver)"
 fi
 
-# Intentionally NOT calling `midclt call docker.update '{"nvidia": true}'`
-# here. At this point in the flow:
-#   - userspace libs in /usr are the stock driver (just cp'd from the
-#     persistent backup)
-#   - kernel modules in RAM are still the custom driver we just removed
-#   - NVML reports "Driver/library version mismatch"
-# Recent TrueNAS middleware validates docker.update by probing NVML, so
-# the call gets silently rejected and persisted as nvidia=false — the
-# script has no way to detect that (errors swallowed) and the user finds
-# the Apps "Use NVIDIA GPU" toggle off after reboot. Defer the re-enable
-# to the user, with explicit instructions in the final banner below.
+# Attempt to re-enable Apps' NVIDIA toggle. Same query → set → verify
+# pattern as install-sysext.sh, for the same reason: NVML is in
+# driver/library mismatch right now (libs in /usr are stock, kernel
+# modules in RAM are still the custom driver we just removed), so
+# middleware may silently reject a blind docker.update. Try, then
+# verify; only print the explicit post-reboot instruction if the
+# re-enable didn't stick. Keep in sync with install-sysext.sh's copy.
+NVIDIA_REENABLE_OK=false
+attempt_nvidia_reenable() {
+    if ! command -v midclt >/dev/null 2>&1; then
+        echo "  midclt not available — skipping app-services re-enable"
+        return 1
+    fi
+
+    local current
+    current=$(midclt call docker.config 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print('true' if d.get('nvidia') else 'false')
+except Exception:
+    pass" 2>/dev/null)
+
+    if [ "$current" = "true" ]; then
+        echo "  app services nvidia toggle already on — no change needed"
+        return 0
+    fi
+
+    midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+
+    local after
+    after=$(midclt call docker.config 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print('true' if d.get('nvidia') else 'false')
+except Exception:
+    pass" 2>/dev/null)
+
+    if [ "$after" = "true" ]; then
+        echo "  app services nvidia toggle re-enabled (verified)"
+        return 0
+    fi
+    return 1
+}
+
+echo ""
+echo "Re-enabling Apps' NVIDIA toggle..."
+if attempt_nvidia_reenable; then
+    NVIDIA_REENABLE_OK=true
+fi
 
 echo ""
 echo "=== Uninstall complete — REBOOT REQUIRED ==="
@@ -136,20 +178,21 @@ echo "After reboot, modules will load fresh from the stock sysext and"
 echo "match the userspace libs (no more NVML mismatch)."
 echo ""
 echo "Run: sudo reboot"
-echo ""
-echo ">>> AFTER REBOOT — one-time step to make Apps see the GPU again <<<"
-echo ""
-echo "App services were turned off during uninstall (so we could swap"
-echo "the driver). The matching re-enable was deliberately skipped"
-echo "because TrueNAS's middleware validates that call against NVML,"
-echo "which is in driver/library mismatch right now — the call would"
-echo "silently fail."
-echo ""
-echo "Once the box is back up and 'nvidia-smi' shows the stock driver, run:"
-echo ""
-echo "  sudo midclt call docker.update '{\"nvidia\": true}'"
-echo ""
-echo "  -- or --"
-echo ""
-echo "  Toggle the 'Use NVIDIA GPU' switch on under TrueNAS UI →"
-echo "  Apps → Settings → Configure → check 'Use NVIDIA GPU' → Save"
+if ! $NVIDIA_REENABLE_OK; then
+    echo ""
+    echo ">>> AFTER REBOOT — one-time step to make Apps see the GPU again <<<"
+    echo ""
+    echo "App services were turned off during uninstall (so we could swap"
+    echo "the driver). Auto re-enable was attempted but did NOT stick —"
+    echo "TrueNAS middleware likely validated the call against NVML,"
+    echo "which is in driver/library mismatch right now, so it rejected."
+    echo ""
+    echo "Once the box is back up and 'nvidia-smi' shows the stock driver, run:"
+    echo ""
+    echo "  sudo midclt call docker.update '{\"nvidia\": true}'"
+    echo ""
+    echo "  -- or --"
+    echo ""
+    echo "  Toggle the 'Use NVIDIA GPU' switch on under TrueNAS UI →"
+    echo "  Apps → Settings → Configure → check 'Use NVIDIA GPU' → Save"
+fi
