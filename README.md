@@ -9,7 +9,9 @@ If you don't know what Nvidia MIG is you then you don't need this sysext (MIGs a
 Default behaviour is to add mig suport to the existing shipped driver on 25.10 or later.
 
 You also need to switch you card into compute mode (this will disable video output if you are using the DP ports)
-Please see the instructions [here](./main/docs/architecture.md#workstation-edition-one-time-setup)
+
+Please see the instructions [here](docs/architecture.md#workstation-edition-one-time-setup)
+
 
 ```bash
 # On TrueNAS, as root:
