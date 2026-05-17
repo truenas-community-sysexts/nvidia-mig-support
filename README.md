@@ -6,7 +6,7 @@ NVIDIA MIG (Multi-Instance GPU) tooling for TrueNAS SCALE hosts running an **RTX
 
 ```bash
 # On TrueNAS, as root:
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash
 sudo configure-mig
 ```
@@ -16,7 +16,7 @@ That's the default path — adds MIG tooling alongside TrueNAS's stock NVIDIA dr
 If you need to replace the nvidia stock driver with the one from the latest release of this sysext, add `--with-driver`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash -s -- --with-driver
 ```
 
@@ -48,7 +48,7 @@ The install script picks the right asset based on whether `--with-driver` is pas
 On TrueNAS, as root:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash
 ```
 
@@ -57,7 +57,7 @@ Auto-detects your TrueNAS version, picks the matching `v<version>-nvidia<driver>
 Multi-pool host? The script auto-picks the right pool when there's an existing config dir or only one data pool; otherwise it prompts. To skip detection and pin the pool explicitly:
 
 ```bash
-curl -fsSL .../scripts/install-sysext.sh | sudo bash -s -- --pool=fast
+curl -fsSL .../scripts/install-mig-sysext.sh | sudo bash -s -- --pool=fast
 # or pass --persist-path=/mnt/fast/.config/nvidia-gpu for full control
 ```
 
@@ -76,7 +76,7 @@ On TrueNAS, as root:
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/recover-stock-nvidia.sh | sudo bash
 
 # Install (driver swap + MIG)
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash -s -- --with-driver
 
 sudo reboot
@@ -109,7 +109,7 @@ It validates your profile list (slice budget, instance caps, `+me.all` / OFA con
 
 ## Verify or preview an install
 
-`install-sysext.sh` accepts three flags useful before, during, and after an actual install:
+`install-mig-sysext.sh` accepts three flags useful before, during, and after an actual install:
 
 - **`--check`** — read-only probe of an existing install. Auto-detects which variant was used (default vs `--with-driver`) and reports a pass/warn/fail summary on sysext merge state, kernel-module loading, driver-version match (sysext blob vs `nvidia-smi` runtime), persist dir, stock backup, PREINIT entries (one for default; two for `--with-driver`), and `configure-mig` availability.
 - **`--dry-run`** — walks through what install would do, downloads + validates the sysext(s), but skips every mutation. Each skipped step prints `[dry-run] would: …`. Useful before installing on a production box, or to check whether a specific tag is reachable + sane.
@@ -117,16 +117,16 @@ It validates your profile list (slice budget, instance caps, `+me.all` / OFA con
 
 ```bash
 # Probe current install state (no mutation)
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh | sudo bash -s -- --check
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash -s -- --check
 
 # Walk through what install would do (no mutation)
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh | sudo bash -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash -s -- --dry-run
 
 # Same, but for the --with-driver variant
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh | sudo bash -s -- --dry-run --with-driver
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash -s -- --dry-run --with-driver
 
 # Pin to a specific release tag
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh | sudo bash -s -- --release=v25.10.3.1-nvidia580.126.18-r10
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash -s -- --release=v25.10.3.1-nvidia580.126.18-r10
 ```
 
 `--check` and `--dry-run` are mutually exclusive. Run `… | sudo bash -s -- --help` for the full flag list including `--pool`, `--persist-path`, `--force`, and `--skip-backup-check`.
@@ -141,31 +141,25 @@ Look for `Kernel-module path matches running kernel <kver>` (good) or `ERROR: ke
 
 ## Uninstall
 
-Both uninstall scripts are bundled into their respective sysext at install time, so you don't need a curl one-liner — just run them locally once the sysext is merged.
-
-Remove only the MIG layer (always safe, doesn't touch the driver):
+A single command auto-detects what's installed and undoes it. Bundled into `nvidia-mig.raw` at install time, so no curl one-liner needed once the sysext is merged:
 
 ```bash
 sudo uninstall-nvidia-mig
 ```
 
-Removes the symlink, re-merges sysext, deregisters the MIG PREINIT entry. The NVIDIA driver (stock or custom) is untouched.
+- **If only the MIG layer is installed** (default `install-mig-sysext.sh`): removes the symlink, re-merges sysext, deregisters the MIG PREINIT. Driver untouched. **No reboot needed.**
+- **If MIG + custom driver is installed** (`--with-driver` path): also stops app services, drains the GPU, restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters the driver PREINIT. **Reboot required** afterwards (and the same 5–10 min Apps-toggle wait — see the post-uninstall banner the script prints).
+- **If neither is installed**: prints "nothing to uninstall" and exits cleanly.
 
-Revert the custom driver (only meaningful if you installed with `--with-driver`):
+Flags:
 
-```bash
-sudo uninstall-nvidia-driver
-sudo reboot
-```
+- `--keep-persist` — don't wipe `/mnt/<pool>/.config/nvidia-gpu/` contents
+- `--skip-backup-check` — allow the driver revert without an `nvidia-original.raw` backup (at your own risk — you won't be able to recover stock later)
 
-Restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters the driver PREINIT, wipes the persistent custom (but keeps the stock backup and `nvidia-mig.raw` — MIG keeps working on the stock driver). The reboot is required for the kernel modules to reload at the stock driver's version.
-
-**Fallback** — if a sysext somehow isn't merged (e.g. corrupted, or you're recovering a host that lost its `/etc/extensions/` symlink), curl-bash still works:
+**Fallback** — if the sysext isn't currently merged (e.g. corrupted, or you're recovering a host that lost its `/etc/extensions/` symlink), curl-bash still works:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/uninstall-mig-sysext.sh | sudo bash
-# or
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/uninstall-nvidia-sysext.sh | sudo bash
 ```
 
 ## Scripts reference
@@ -174,11 +168,10 @@ All scripts support `--help` for the full flag list. The install script bundles 
 
 | Script | Run when | What it does |
 | --- | --- | --- |
-| [`install-sysext.sh`](scripts/install-sysext.sh) | Setting up MIG on a host | Default: downloads `nvidia-mig.raw`, deploys it next to the stock sysext, registers a PREINIT entry. No reboot. `--with-driver`: also downloads `nvidia.raw`, swaps the stock driver (requires `/usr` r/w briefly), registers a second PREINIT entry. **Reboot required.** |
-| [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Before `install-sysext.sh --with-driver` if you don't already have a stock backup | Pulls the stock `nvidia.raw` out of the official TrueNAS `.update` archive and stores it as `nvidia-original.raw` for later restore. |
+| [`install-mig-sysext.sh`](scripts/install-mig-sysext.sh) | Setting up MIG on a host | Default: downloads `nvidia-mig.raw`, deploys it next to the stock sysext, registers a PREINIT entry. No reboot. `--with-driver`: also downloads `nvidia.raw`, swaps the stock driver (requires `/usr` r/w briefly), registers a second PREINIT entry. **Reboot required.** |
+| [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Before `install-mig-sysext.sh --with-driver` if you don't already have a stock backup | Pulls the stock `nvidia.raw` out of the official TrueNAS `.update` archive and stores it as `nvidia-original.raw` for later restore. |
 | `configure-mig` *(bundled in nvidia-mig.raw at `/usr/bin/configure-mig`)* | After install, and any time you want to change the MIG layout | Validates your MIG profile string, writes `mig.conf`, restarts the MIG service, then walks you through assigning each MIG device to a TrueNAS app. |
-| `uninstall-nvidia-mig` *(bundled in nvidia-mig.raw at `/usr/bin/uninstall-nvidia-mig`; source: [`uninstall-mig-sysext.sh`](scripts/uninstall-mig-sysext.sh))* | Removing the MIG layer (leaves the driver alone) | Removes the symlink, re-merges sysext, deregisters the MIG PREINIT. Driver untouched. |
-| `uninstall-nvidia-driver` *(bundled in nvidia.raw at `/usr/bin/uninstall-nvidia-driver`; source: [`uninstall-nvidia-sysext.sh`](scripts/uninstall-nvidia-sysext.sh))* | Reverting `--with-driver` back to the stock driver | Restores stock `nvidia.raw` from the backup, deregisters the driver PREINIT, leaves MIG sysext in place. **Reboot required.** |
+| `uninstall-nvidia-mig` *(bundled in nvidia-mig.raw at `/usr/bin/uninstall-nvidia-mig`; source: [`uninstall-mig-sysext.sh`](scripts/uninstall-mig-sysext.sh))* | Removing anything this repo installed | Auto-detects state. MIG-only → removes the symlink, re-merges sysext, deregisters MIG PREINIT, no reboot. MIG + custom driver → also restores stock `nvidia.raw`, deregisters the driver PREINIT, **reboot required**. |
 
 ## More
 

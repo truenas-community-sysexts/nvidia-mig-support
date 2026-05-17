@@ -3,7 +3,7 @@
 # nvidia sysext with a chosen NVIDIA driver version. No MIG tooling, no
 # preinit logic: those live in nvidia-mig.raw (built separately by
 # build-mig-sysext.sh) and are installed independently. See
-# install-sysext.sh --with-driver to install both atomically.
+# install-mig-sysext.sh --with-driver to install both atomically.
 #
 # Port of https://github.com/biohazardious/truenas-nvidia-driver-updater
 # entrypoint.sh, adapted to run directly on a fresh Debian/Ubuntu host
@@ -472,19 +472,13 @@ MAIN_KO=$(find "$STAGING_DIR" -name 'nvidia.ko' -not -name 'nvidia-*.ko' -type f
 ok "Main nvidia.ko at: $MAIN_KO"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 5b — Bundle the driver-side uninstaller for local use after merge
+# PHASE 5b — (intentionally empty)
 # ─────────────────────────────────────────────────────────────────────────────
-# The MIG tooling (configure-mig, nvidia-mig-setup.service, the MIG setup
-# binary) lives in nvidia-mig.raw — not here. nvidia.raw is driver-only.
-banner "Phase 5b: Bundle uninstall-nvidia-driver"
-mkdir -p "$STAGING_DIR/usr/bin"
-# Bundle the uninstall script at /usr/bin/uninstall-nvidia-driver so
-# users can revert to stock with `sudo uninstall-nvidia-driver` instead
-# of a curl|bash. Bash reads the script into memory at parse time, so
-# the script keeps running fine after the sysext is unmerged mid-flow.
-cp "$REPO_ROOT/scripts/uninstall-nvidia-sysext.sh" "$STAGING_DIR/usr/bin/uninstall-nvidia-driver"
-chmod 0755 "$STAGING_DIR/usr/bin/uninstall-nvidia-driver"
-ok "uninstall-nvidia-driver bundled"
+# nvidia.raw is driver-only. The user-facing uninstaller (`uninstall-nvidia-mig`)
+# is bundled into nvidia-mig.raw, which is ALWAYS installed alongside
+# nvidia.raw in the --with-driver path. Bundling another copy here would
+# create a /usr/bin path collision under systemd-sysext merge.
+info "Phase 5b: nothing to bundle in nvidia.raw (uninstaller lives in nvidia-mig.raw)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 5c — Extension-release metadata (ID=_any, matches TrueNAS convention)

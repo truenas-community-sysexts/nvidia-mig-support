@@ -1,6 +1,6 @@
 # MIG Persistence: surviving reboots and TrueNAS updates
 
-MIG instances on Blackwell don't survive reboots, and TrueNAS updates rewrite `/usr` from scratch. This doc explains how the two-sysext model handles both, and what to expect under each install variant of `install-sysext.sh` (default vs `--with-driver`).
+MIG instances on Blackwell don't survive reboots, and TrueNAS updates rewrite `/usr` from scratch. This doc explains how the two-sysext model handles both, and what to expect under each install variant of `install-mig-sysext.sh` (default vs `--with-driver`).
 
 ## What persists where
 
@@ -29,7 +29,7 @@ That's it. The service is shipped inside `nvidia-mig.raw`. Once started, it read
 
 ### --with-driver path: two PREINITs
 
-`install-sysext.sh --with-driver` registers a **second** PREINIT alongside the MIG one. The driver PREINIT runs `/mnt/<pool>/.config/nvidia-gpu/nvidia-preinit-driver.sh`, which:
+`install-mig-sysext.sh --with-driver` registers a **second** PREINIT alongside the MIG one. The driver PREINIT runs `/mnt/<pool>/.config/nvidia-gpu/nvidia-preinit-driver.sh`, which:
 
 1. Compares SHA256 of the live `/usr/share/truenas/sysext-extensions/nvidia.raw` against the persistent custom `/mnt/<pool>/.config/nvidia-gpu/nvidia.raw`.
 2. If they match → normal boot. Nothing to do here.
@@ -38,7 +38,7 @@ That's it. The service is shipped inside `nvidia-mig.raw`. Once started, it read
 
 The driver PREINIT does **not** start the MIG service — that's the MIG PREINIT's job. Splitting the two means the driver script is concerned only with driver state, and the MIG-side wait for the driver to become responsive (see below) lets the two PREINITs fire in any order without coordination.
 
-The script is installed once during `install-sysext.sh --with-driver` and re-registered after every update because the PREINIT DB entry persists.
+The script is installed once during `install-mig-sysext.sh --with-driver` and re-registered after every update because the PREINIT DB entry persists.
 
 ## What `nvidia-mig-setup.service` actually does
 
@@ -112,8 +112,7 @@ After a TrueNAS update the first boot is longer (the restore dance adds 5–10 s
 
 | Script | What it undoes |
 | --- | --- |
-| `uninstall-mig-sysext.sh` *(bundled as `/usr/bin/uninstall-nvidia-mig`)* | Removes `/etc/extensions/nvidia-mig.raw` symlink, re-merges sysext, deregisters PREINIT entry. Stock driver is untouched (was untouched all along). |
-| `uninstall-nvidia-sysext.sh` *(bundled as `/usr/bin/uninstall-nvidia-driver`)* | Restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters PREINIT, wipes persistent custom but keeps the stock backup. Requires reboot to load the matching kernel modules. |
+| `uninstall-mig-sysext.sh` *(bundled as `/usr/bin/uninstall-nvidia-mig`)* | Auto-detects state. **MIG-only**: removes `/etc/extensions/nvidia-mig.raw` symlink, re-merges sysext, deregisters MIG PREINIT — stock driver untouched, no reboot. **MIG + custom driver**: also stops apps, drains GPU, restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters the driver PREINIT — **reboot required** to load matching kernel modules. The stock backup is preserved across uninstalls. |
 | `recover-stock-nvidia.sh` | Extracts a fresh stock `nvidia.raw` from the official TrueNAS `.update` archive (two-level squashfs peel). Use when no `nvidia-original.raw` backup exists. |
 
 ## Why this design

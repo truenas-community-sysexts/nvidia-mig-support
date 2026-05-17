@@ -12,13 +12,13 @@
 #      doesn't end up debugging "nvidia-smi reports no devices" via
 #      strace.
 #
-# MIG service start is NOT handled here — install-sysext.sh registers a
+# MIG service start is NOT handled here — install-mig-sysext.sh registers a
 # separate PREINIT entry that runs `systemctl start nvidia-mig-setup.service`.
 # That ordering doesn't matter: nvidia-mig-setup has a built-in wait for
 # the driver to become responsive (not just for the nvidia-smi binary to
 # appear), so the two PREINITs can fire in either order without coordination.
 #
-# Registered via midclt initshutdownscript by install-sysext.sh --with-driver.
+# Registered via midclt initshutdownscript by install-mig-sysext.sh --with-driver.
 # Logs to both stdout (visible via journalctl -u <init-shutdown-script>)
 # and syslog tagged `nvidia-preinit-driver` (journalctl -b -t nvidia-preinit-driver
 # for boot-scoped filtering).
@@ -157,7 +157,7 @@ else
     if [ -n "$SYSEXT_KVER" ]; then
         log "ERROR: kernel-version mismatch — running ${RUNNING_KVER} but sysext bundles modules for ${SYSEXT_KVER}"
         log "ERROR: TrueNAS was likely updated to a new kernel. Re-install a sysext matching ${RUNNING_KVER}:"
-        log "ERROR:   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install-sysext.sh | sudo bash -s -- --with-driver"
+        log "ERROR:   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install-mig-sysext.sh | sudo bash -s -- --with-driver"
         log "ERROR:   (auto-detects the new TrueNAS version and picks a matching release)"
         log "ERROR: Or browse: https://github.com/${REPO}/releases"
     else

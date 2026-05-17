@@ -52,7 +52,7 @@ The GPU sees one merged userspace via `systemd-sysext`. Multiple `.raw` extensio
 
 ## The two install variants
 
-`install-sysext.sh` operates in one of two modes; the **same** release supplies the assets for both. The MIG sysext is always installed; the custom driver is layered underneath only when `--with-driver` is passed.
+`install-mig-sysext.sh` operates in one of two modes; the **same** release supplies the assets for both. The MIG sysext is always installed; the custom driver is layered underneath only when `--with-driver` is passed.
 
 ### Default (`nvidia-mig.raw` only)
 
@@ -81,12 +81,13 @@ Swaps the stock `nvidia.raw` for one containing a different driver version (e.g.
        nvidia.raw (custom, driver-only, ~420 MB)
             │
             ├─ NVIDIA driver (libs, .ko modules, nvidia-smi, …)
-            ├─ nvidia-container-toolkit
-            └─ /usr/bin/uninstall-nvidia-driver    (local revert helper)
+            └─ nvidia-container-toolkit
             +
        hailo.raw (untouched)
             +
-       nvidia-mig.raw (same as default path — MIG tooling lives here only)
+       nvidia-mig.raw (same as default path — MIG tooling lives here only,
+                       and so does the unified /usr/bin/uninstall-nvidia-mig
+                       which auto-detects MIG-only vs MIG+driver state)
 ```
 
 Built on an `ubuntu-24.04` GitHub Actions runner (no Docker) in ~8 min. Ports biohazardious/truenas-nvidia-driver-updater's `entrypoint.sh`:
@@ -135,12 +136,12 @@ Once built and attached to a release, install it from TrueNAS:
 curl -fL -o /tmp/nvidia.raw \
   https://github.com/truenas-community-sysexts/nvidia-mig-support/releases/download/<tag>/nvidia.raw
 
-# Hand it to install-sysext.sh --with-driver
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh \
+# Hand it to install-mig-sysext.sh --with-driver
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash -s -- --with-driver --driver-sysext=/tmp/nvidia.raw
 ```
 
-`--driver-sysext=PATH` skips the default release-API resolution for `nvidia.raw`; `--sysext=PATH` does the same for `nvidia-mig.raw`. `--release=TAG` pins both to a specific tag (e.g. `v25.10.3.1-nvidia580.126.18-r10`) instead of the auto-detected latest. See `install-sysext.sh --help` for the full flag list, plus `--check` (read-only probe) and `--dry-run` (validate without mutating).
+`--driver-sysext=PATH` skips the default release-API resolution for `nvidia.raw`; `--sysext=PATH` does the same for `nvidia-mig.raw`. `--release=TAG` pins both to a specific tag (e.g. `v25.10.3.1-nvidia580.126.18-r10`) instead of the auto-detected latest. See `install-mig-sysext.sh --help` for the full flag list, plus `--check` (read-only probe) and `--dry-run` (validate without mutating).
 
 ## Boot-time activation: TrueNAS PREINIT
 
@@ -189,7 +190,7 @@ Everything that must survive a TrueNAS update lives under `/mnt/<pool>/.config/n
 
 | File | Purpose |
 | --- | --- |
-| `nvidia-original.raw` | Stock TrueNAS `nvidia.raw` backup. Used by `uninstall-nvidia-sysext.sh` and `recover-stock-nvidia.sh`. |
+| `nvidia-original.raw` | Stock TrueNAS `nvidia.raw` backup. Used by `uninstall-mig-sysext.sh` (when reverting from `--with-driver`) and `recover-stock-nvidia.sh`. |
 | `nvidia.raw` | Custom driver sysext (`--with-driver` only). Re-applied by `nvidia-preinit-driver.sh` after `/usr` is wiped by a TrueNAS update. |
 | `nvidia-mig.raw` | MIG sysext (always installed). Symlinked from `/etc/extensions/`. |
 | `mig.conf` | `MIG_PROFILES=14,14,14,14` style config read by `nvidia-mig-setup`. |

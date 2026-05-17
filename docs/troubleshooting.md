@@ -10,7 +10,7 @@ Failed to initialize NVML: Driver/library version mismatch
 NVML library version: 570.172
 ```
 
-**Cause:** You just ran `install-sysext.sh --with-driver` or `recover-stock-nvidia.sh --install`. The new userspace libraries are live (sysext is merged), but the previous driver's kernel modules are still loaded in kernel memory.
+**Cause:** You just ran `install-mig-sysext.sh --with-driver` or `recover-stock-nvidia.sh --install`. The new userspace libraries are live (sysext is merged), but the previous driver's kernel modules are still loaded in kernel memory.
 
 **Fix:** Reboot. On next boot, kernel modules load fresh at the matching version, sysext re-merges, mismatch is gone.
 
@@ -18,7 +18,7 @@ NVML library version: 570.172
 sudo reboot
 ```
 
-Hot-unload (no reboot) is technically possible — `rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia` after stopping Docker — but the reboot path is more reliable. `install-sysext.sh --with-driver` prints an explicit reboot-required warning for this reason.
+Hot-unload (no reboot) is technically possible — `rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia` after stopping Docker — but the reboot path is more reliable. `install-mig-sysext.sh --with-driver` prints an explicit reboot-required warning for this reason.
 
 ## MIG service is `enabled` but `inactive (dead)` after reboot, with no journal entries
 
@@ -36,7 +36,7 @@ $ journalctl -u nvidia-mig-setup.service -b 0
 **Fix:** Re-run the install — it will (re-)create the PREINIT entry:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash
 ```
 
 Verify the PREINIT registration directly:
@@ -53,7 +53,7 @@ for s in json.load(sys.stdin):
 
 ## `recover-stock-nvidia.sh` says `nvidia-original.raw not found` / no backup available
 
-**Cause:** You never had a stock-driver backup, or an earlier install/restore cycle wiped it. The default install doesn't need one (it never touches stock `nvidia.raw`), but `install-sysext.sh --with-driver` and `uninstall-nvidia-sysext.sh` both depend on having one.
+**Cause:** You never had a stock-driver backup, or an earlier install/restore cycle wiped it. The default install doesn't need one (it never touches stock `nvidia.raw`), but `install-mig-sysext.sh --with-driver` and `uninstall-mig-sysext.sh` (when reverting from `--with-driver`) both depend on having one.
 
 **Fix:** Use `recover-stock-nvidia.sh` (with no flags first to download + extract, then with `--install` if you also want to live-swap back to stock):
 
@@ -117,7 +117,7 @@ If `system.ready` returns `true` and `midclt` calls still fail, that's a genuine
 
 ## After a TrueNAS update, `--with-driver` path loses the custom driver
 
-**Cause:** TrueNAS updates rewrite `/usr` from scratch, which wipes the custom `nvidia.raw` you'd installed. The PREINIT script registered by `install-sysext.sh --with-driver` (`nvidia-preinit-driver.sh`) is designed to handle this — on the next boot it compares SHA256 of live `nvidia.raw` vs the persistent custom copy on `/mnt/<pool>/.config/nvidia-gpu/`, detects the wipe, and re-applies the custom driver before Docker starts.
+**Cause:** TrueNAS updates rewrite `/usr` from scratch, which wipes the custom `nvidia.raw` you'd installed. The PREINIT script registered by `install-mig-sysext.sh --with-driver` (`nvidia-preinit-driver.sh`) is designed to handle this — on the next boot it compares SHA256 of live `nvidia.raw` vs the persistent custom copy on `/mnt/<pool>/.config/nvidia-gpu/`, detects the wipe, and re-applies the custom driver before Docker starts.
 
 **Fix (usually nothing):** Reboot once after the TrueNAS update completes. The PREINIT script handles the re-application automatically. Verify it ran:
 
@@ -128,16 +128,16 @@ sudo /usr/bin/nvidia-smi --query-gpu=driver_version --format=csv,noheader
 
 The driver version should match what you installed, not the version TrueNAS just shipped.
 
-A more structured probe in one shot — `install-sysext.sh --check` reports all of the same state (sysext merged, kernel module loaded, driver-version match between the sysext blob and `nvidia-smi` runtime, PREINIT registration, etc.) in a pass/warn/fail summary, without modifying anything:
+A more structured probe in one shot — `install-mig-sysext.sh --check` reports all of the same state (sysext merged, kernel module loaded, driver-version match between the sysext blob and `nvidia-smi` runtime, PREINIT registration, etc.) in a pass/warn/fail summary, without modifying anything:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash -s -- --check
 ```
 
 The most actionable failure to look for is a kernel-version mismatch — the PREINIT script writes `ERROR: kernel-version mismatch — running <kver> but sysext bundles modules for <kver>` to the syslog tag above when this happens, and points at the install one-liner to fix.
 
-If something went wrong and the PREINIT didn't run (or the persistent `/mnt/<pool>/.config/nvidia-gpu/nvidia.raw` is missing): re-run `install-sysext.sh --with-driver`. Use `--dry-run` first if you want to walk through what it would do before letting it mutate the system.
+If something went wrong and the PREINIT didn't run (or the persistent `/mnt/<pool>/.config/nvidia-gpu/nvidia.raw` is missing): re-run `install-mig-sysext.sh --with-driver`. Use `--dry-run` first if you want to walk through what it would do before letting it mutate the system.
 
 ## MIG instances don't come back after reboot
 
@@ -181,12 +181,12 @@ Or via the TrueNAS UI: Apps → app → Edit → Resources → NVIDIA GPU → pi
 
 ```bash
 # Install a current driver from this repo's releases + MIG tooling on top
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash -s -- --with-driver
 ```
 
 If you genuinely want to use MIG on a stock-but-old driver, bypass the gate:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh | sudo bash -s -- --force
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash -s -- --force
 ```
