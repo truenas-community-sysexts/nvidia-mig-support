@@ -475,52 +475,68 @@ done
 
 # --- Enumerate created MIG instances ---
 #
-# Parse `nvidia-smi -L`'s MIG device lines. Each line looks like:
+# Build aligned arrays of (GI_ID, profile_id, profile_name, UUID) for
+# every MIG device on the GPU. No single nvidia-smi query gives us all
+# four on this driver (570.172.08), so we combine two:
 #
-#     "  MIG 2g.48gb+gfx     Device  0: (UUID: MIG-f54d3804-...)"
+#   - `mig -lgi`     → GI ID + profile_id + profile_name (with suffix
+#                      like "+me" / "+gfx" — needed for the label)
+#   - `nvidia-smi -L` → UUIDs, listed in GI-ID-ascending order
 #
-# We extract BOTH the profile name AND the UUID per line and store them
-# parallel-indexed. Earlier revisions of this script took only the UUIDs
-# and then paired them with the profile-ID list from mig.conf by array
-# index, assuming `nvidia-smi -L` returns devices in mig.conf creation
-# order. That assumption is wrong: the NVIDIA driver assigns GPU
-# Instance IDs based on slice-placement constraints, and `nvidia-smi -L`
-# lists MIG devices in GI-ID order — not creation order. With profiles
-# of different slice counts (e.g. 21,35,47 where 35 needs 2 slices),
-# GI IDs end up shuffled relative to mig.conf order, the index-pairing
-# mislabels every device, and the user's "device 1 = 1g.24gb+me" pick
-# actually pinned their container to whatever-the-first-GI-actually-is
-# (often the 2g slice). Verified on RTX PRO 6000 Blackwell with
-# profiles 21,35,47 producing GIs 3,2,4 in that creation order.
+# We sort `mig -lgi`'s rows by GI ID ascending and zip by index. The
+# count-mismatch guard below catches gross drift if NVIDIA ever changes
+# the `-L` ordering.
 #
-# Reading the profile name straight from nvidia-smi's output makes the
-# labels match the UUIDs always, regardless of GI assignment order.
-MIG_DEVICE_PROFILES=()
-MIG_UUIDS=()
-while IFS= read -r line; do
-    # Robust to extra whitespace; tolerant of name characters used in
-    # Blackwell profiles: digits, letters, dots, plus signs, hyphens.
-    profile=$(printf '%s' "$line" | sed -nE 's/.*MIG[[:space:]]+([0-9A-Za-z.+\-]+).*Device[[:space:]]+[0-9]+.*/\1/p')
-    uuid=$(printf '%s' "$line" | sed -nE 's/.*\(UUID:[[:space:]]*(MIG-[^)]+)\).*/\1/p')
-    if [ -n "$profile" ] && [ -n "$uuid" ]; then
-        MIG_DEVICE_PROFILES+=("$profile")
-        MIG_UUIDS+=("$uuid")
-    fi
-done < <(/usr/bin/nvidia-smi -L 2>/dev/null | grep -E '^[[:space:]]+MIG[[:space:]]')
+# Earlier revisions paired `-L`'s UUIDs with the profile list in mig.conf
+# by array index, on the wrong assumption that `-L` lists devices in
+# mig.conf creation order. The driver assigns GI IDs by slice-placement
+# constraints, not creation order, so `mig.conf=21,35,47` produced GIs
+# 3,2,4 and `-L` listed them in GI-ID order [GI 2, GI 3, GI 4], which
+# mislabelled every device. Verified on RTX PRO 6000 Blackwell.
 
-if [ "${#MIG_UUIDS[@]}" -eq 0 ]; then
-    echo "ERROR: no MIG UUIDs found after instance creation. Check journalctl -u nvidia-mig-setup." >&2
+# mig -lgi  →  "GI profile_id profile_name", sorted by GI ascending.
+# Each output row looks like:
+#   |   0  MIG 1g.24gb+me        21        3          0:3     |
+mapfile -t MIG_LGI_LINES < <(/usr/bin/nvidia-smi mig -lgi 2>/dev/null \
+    | sed -nE 's/.*MIG[[:space:]]+([0-9A-Za-z.+\-]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+[0-9]+:[0-9]+.*/\3 \2 \1/p' \
+    | sort -n)
+
+# nvidia-smi -L  →  UUIDs in MIG-device order (= GI-ID ascending).
+mapfile -t MIG_LIST_UUIDS < <(/usr/bin/nvidia-smi -L 2>/dev/null \
+    | sed -nE 's/.*Device[[:space:]]+[0-9]+:[[:space:]]*\(UUID:[[:space:]]*(MIG-[^)]+)\).*/\1/p')
+
+if [ "${#MIG_LGI_LINES[@]}" -eq 0 ]; then
+    echo "ERROR: 'nvidia-smi mig -lgi' returned no GPU instances. Check journalctl -u nvidia-mig-setup." >&2
     exit 1
 fi
+if [ "${#MIG_LIST_UUIDS[@]}" -ne "${#MIG_LGI_LINES[@]}" ]; then
+    echo "ERROR: 'mig -lgi' reports ${#MIG_LGI_LINES[@]} GPU instance(s)" >&2
+    echo "       but 'nvidia-smi -L' lists ${#MIG_LIST_UUIDS[@]} MIG device(s)." >&2
+    echo "       These should always agree — refuse to guess the mapping." >&2
+    exit 1
+fi
+
+MIG_GIS=()
+MIG_PROFILE_IDS=()
+MIG_DEVICE_PROFILES=()
+MIG_UUIDS=()
+for i in "${!MIG_LGI_LINES[@]}"; do
+    read -r gi pid pname <<<"${MIG_LGI_LINES[$i]}"
+    MIG_GIS+=("$gi")
+    MIG_PROFILE_IDS+=("$pid")
+    MIG_DEVICE_PROFILES+=("$pname")
+    MIG_UUIDS+=("${MIG_LIST_UUIDS[$i]}")
+done
+
 echo "MIG devices created: ${#MIG_UUIDS[@]}"
 
 IFS=',' read -ra PROFILE_ARRAY <<< "$MIG_PROFILES"
 
 # Sanity check: mig.conf profile count must match actual MIG instance
-# count. We no longer index PROFILE_ARRAY for device LABELS (those come
-# straight from nvidia-smi -L now), but a count mismatch still indicates
-# something went wrong — service didn't re-run with the new mig.conf,
-# or someone created/destroyed instances outside the service.
+# count. We don't index PROFILE_ARRAY for device LABELS anymore (those
+# come from `mig -lgi`), but a count mismatch still indicates the MIG
+# service didn't re-run with the new mig.conf, or someone created/
+# destroyed instances outside the service.
 if [ "${#PROFILE_ARRAY[@]}" -ne "${#MIG_UUIDS[@]}" ]; then
     echo "" >&2
     echo "ERROR: mig.conf has ${#PROFILE_ARRAY[@]} entries (${MIG_PROFILES})" >&2
@@ -537,8 +553,12 @@ if $SKIP_APP_MAPPING || [ "${APP_COUNT:-0}" -eq 0 ]; then
     echo ""
     echo "=== MIG Devices ==="
     for i in "${!MIG_UUIDS[@]}"; do
-        printf "  [%d] %s\n        %s\n" \
-            "$((i+1))" "$(profile_label_from_name "${MIG_DEVICE_PROFILES[$i]}")" "${MIG_UUIDS[$i]}"
+        # Include the GPU Instance (GI) ID so duplicate-profile setups
+        # (e.g. mig.conf=14,14,14,14) are visually distinct.
+        printf "  [%d] GI %s — %s\n        %s\n" \
+            "$((i+1))" "${MIG_GIS[$i]}" \
+            "$(profile_label_from_name "${MIG_DEVICE_PROFILES[$i]}")" \
+            "${MIG_UUIDS[$i]}"
     done
     echo ""
     echo "Skipping app↔MIG mapping (no apps found or --skip-app-mapping given)."
@@ -580,6 +600,7 @@ while true; do
     echo "--- MIG Devices ---"
     for i in "${!MIG_UUIDS[@]}"; do
         dtype=$(profile_label_from_name "${MIG_DEVICE_PROFILES[$i]}")
+        gi_id="${MIG_GIS[$i]}"
         assigned_to=""
         for j in "${!STAGED_UUID[@]}"; do
             if [ "${STAGED_UUID[$j]}" = "${MIG_UUIDS[$i]}" ]; then
@@ -590,10 +611,12 @@ while true; do
                 fi
             fi
         done
+        # Include the GPU Instance ID so duplicate-profile rows remain
+        # visually distinct (e.g. mig.conf=14,14,14,14).
         if [ -n "$assigned_to" ]; then
-            echo "  [$((i+1))] ${dtype}  -->  ${assigned_to}"
+            echo "  [$((i+1))] GI ${gi_id} — ${dtype}  -->  ${assigned_to}"
         else
-            echo "  [$((i+1))] ${dtype}"
+            echo "  [$((i+1))] GI ${gi_id} — ${dtype}"
         fi
         echo "        ${MIG_UUIDS[$i]}"
     done
