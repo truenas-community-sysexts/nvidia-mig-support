@@ -961,6 +961,7 @@ except Exception:
         echo "  app services nvidia toggle re-enabled (verified)"
         return 0
     fi
+    echo "  could NOT re-enable right now (likely NVML mismatch from the just-applied driver swap); see post-reboot instructions below"
     return 1
 }
 
