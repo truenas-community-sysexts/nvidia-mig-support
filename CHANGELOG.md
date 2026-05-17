@@ -2,6 +2,16 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## configure-mig: ignore stale UUIDs + cache original app state for restart
+
+Two follow-up bugs from the per-app-stop change one entry below, both surfaced on hardware test of release r16:
+
+1. **App that wasn't actually using the GPU got pre-stopped.** A `glances` app showed no NVIDIA assignment in the TrueNAS UI but still appeared in the pre-stop scan and got stopped. The app's persisted `nvidia_gpu_selection.<slot>` entry had `use_gpu: false` together with the current GPU's UUID — TrueNAS persists the slot binding even when the user toggles off "use this GPU" in the UI. The scan filter didn't look at `use_gpu` at all, so any app with a non-empty UUID anywhere in the selection map got flagged as GPU-bound. Fix: tighten the filter to require both (a) `use_gpu == true` for the slot (the app is actively using the GPU, not just carrying a slot entry with the toggle off), and (b) the slot's UUID matches a device that actually exists on the current hardware. The valid set comes from `nvidia-smi -L`: parent GPU plus any existing MIG slices. Matches the UI's "is this binding live?" gating, and is defensive against the GPU-swap case (UUID from a previously-installed card) even if that's not what triggered this particular report.
+
+2. **Apps that were RUNNING ended up STOPPED after configure-mig.** The app-mapping section queries `app.get_instance` *during* its apply loop to record each app's "original state" — but by then the new per-app-stop code has already taken those apps from RUNNING → STOPPED. The loop sees STOPPED, applies the MIG UUID, then says "leaving stopped (was not running originally)". Fix: cache the pre-stop scan's `name|state` in `GPU_APPS_INFO`, and have the app-mapping `orig_state` lookup prefer the cached value when present. Apps newly assigned this run (not in the pre-stop set) still query live as before.
+
+Apps that the user *doesn't* assign to a MIG UUID stay stopped — intentional, since their config still points at the now-non-existent full-GPU UUID and restarting them would just produce a crash loop. The visible-stopped signal is correct.
+
 ## configure-mig: explicit `app.stop` before MIG create + diagnostic abort on stuck GPU
 
 Hardware-test finding (issue #47). A first run of `configure-mig` against a host with running GPU apps (Frigate, Ollama, etc.) ended with a misleading `ERROR: 'nvidia-smi mig -lgi' returned no GPU instances. Check journalctl…` after `Waiting for 6 GPU process(es)... 120s/120s`. Journal showed the real cause: `nvidia-smi mig -cgi` failing with `In use by another client` because containers with open CUDA/NVENC contexts kept holding the GPU past the wait window.
