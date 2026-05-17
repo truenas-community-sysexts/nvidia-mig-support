@@ -456,6 +456,14 @@ midclt call docker.update '{"nvidia": true}' >/dev/null \
     || echo "WARN: app services API call (docker.update) re-enable failed"
 
 # --- Wait for apps to come back so we can list them ---
+#
+# Two-phase wait: first poll until app.query returns >0, then sleep a
+# short stabilization window. Empirically, immediately after the
+# docker.update '{"nvidia": true}' job completes, middleware can briefly
+# return partial or empty results from app.query — the first poll
+# crossing the threshold can be a transient, with a follow-up call a few
+# seconds later returning 0 again. The stabilization wait lets app state
+# settle so the APP_NAMES enumeration below sees the full list.
 echo "Waiting for app services to come back (60-90s)..."
 APP_COUNT=0
 printf "  Waiting... 0s/90s"
@@ -472,6 +480,18 @@ except: print(0)" 2>/dev/null)
     sleep 5
 done
 [ "${attempt:-0}" -eq 18 ] && echo ""
+
+# Stabilization: middleware state can flap for a few seconds after
+# app.query first returns non-empty. Visible counter so the user knows
+# what we're doing instead of an opaque pause.
+if [ "${APP_COUNT:-0}" -gt 0 ]; then
+    printf "  Stabilizing app state... 0s/10s"
+    for s in $(seq 1 10); do
+        sleep 1
+        printf "\r  Stabilizing app state... %ds/10s" "$s"
+    done
+    printf "\r  Stabilizing app state... done       \n"
+fi
 
 # --- Enumerate created MIG instances ---
 #
@@ -567,11 +587,25 @@ if $SKIP_APP_MAPPING || [ "${APP_COUNT:-0}" -eq 0 ]; then
 fi
 
 # --- App list + PCI slot ---
-mapfile -t APP_NAMES < <(midclt call app.query 2>/dev/null \
-    | python3 -c "import sys,json
+#
+# Retry on empty: the stabilization wait above usually covers the
+# middleware-state-flap window, but as belt-and-braces, poll up to 5×3s
+# if the first query comes back empty. Lists EVERY app regardless of
+# state (RUNNING/STOPPED/CRASHED/DEPLOYING) — assigning a MIG slice to
+# a stopped or crashed app is a valid operation.
+APP_NAMES=()
+for app_attempt in 1 2 3 4 5; do
+    mapfile -t APP_NAMES < <(midclt call app.query 2>/dev/null \
+        | python3 -c "import sys,json
 for app in json.load(sys.stdin):
     n = app.get('name','')
     if n: print(n)" 2>/dev/null)
+    if [ "${#APP_NAMES[@]}" -gt 0 ]; then
+        break
+    fi
+    printf "  App list returned empty (attempt %d/5), retrying in 3s...\n" "$app_attempt"
+    sleep 3
+done
 
 PCI_SLOT=$(midclt call app.gpu_choices 2>/dev/null \
     | python3 -c "import sys,json

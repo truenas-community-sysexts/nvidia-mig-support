@@ -2,6 +2,19 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## configure-mig: race condition in app-picker enumeration
+
+Hardware-test finding: `sudo configure-mig` would intermittently show an empty `--- Apps ---` section in the device-to-app assignment picker even though `App services ready (6 apps)` had just printed seconds earlier. Re-running the script a minute later produced the full list.
+
+Root cause: middleware app state isn't fully consistent immediately after `docker.update '{"nvidia": true}'` returns. The existing wait loop polls `app.query` and exits as soon as it returns `>0` apps — but a follow-up `app.query` a few seconds later can still return empty during the same flap window. The picker's `mapfile -t APP_NAMES` query then sees an empty list, so the display loop has nothing to iterate.
+
+Two-layer fix:
+
+1. **Stabilization wait** after the "ready" detection: once the wait-loop exits, sleep a visible 10s (counter every second) so middleware state settles before the picker queries again. Matches the user's "give it 5–10s after services come back" hypothesis.
+2. **Retry on empty** at the actual picker query: `mapfile -t APP_NAMES` is wrapped in a 5×3s poll that re-queries if the first result is empty. Defense in depth — covers any other middleware transient the stabilization wait missed.
+
+The picker also now explicitly lists every app regardless of state (RUNNING/STOPPED/CRASHED/DEPLOYING) — assigning a MIG slice to a stopped app is a valid operation. The previous code already had no state filter, but the comment now makes the intent explicit.
+
 ## Uninstall replaces `docker.update` sledgehammer with explicit `app.stop`
 
 Hardware-test follow-up to #42. The previous teardown flow relied on `midclt call -j docker.update '{"nvidia": false}'` to "stop every container using the nvidia runtime", then drained, then destroyed MIG instances. In practice the toggle does NOT stop already-running containers — it only changes the docker runtime config so *future* container starts won't request a GPU. Containers with open CUDA/NVENC/NVDEC contexts keep running, keep holding their MIG slices, and `nvidia-smi mig -dci` fails with `In use by another client`.
