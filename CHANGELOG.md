@@ -2,6 +2,16 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## Uninstall reassign-loop hardening (silent abort + state-scope + docker job race)
+
+Hardware-test finding on the previous "rewrite per-app MIG-* UUIDs" change (#41): on a host with apps in mixed states, the script went silent right after `Reassigning apps that still point at MIG-* UUIDs...` and never reached sysext-unmerge, PREINIT-deregister, or persist-cleanup. Diagnostic showed `nvidia-mig.raw` symlink still in `/etc/extensions/`, PREINIT id still registered, `mig.conf` still on disk, and the target app's `nvidia_gpu_selection.<slot>.uuid` still pointing at a stale `MIG-*` value.
+
+Three concurrent bugs:
+
+1. **`set -euo pipefail` + unprotected command substitutions** — `mig_info=$(midclt call app.config "$app" 2>/dev/null | python3 -c "…" 2>/dev/null)` (and the analogous read in the restart loop) ran without `|| true`. When `midclt call app.config <name>` failed for any one app (mid-deploy, crashed, transient middleware error), `pipefail` propagated the non-zero status through the command substitution and `set -e` aborted the whole script silently before any per-app output landed. Hardened with `|| true` on every middleware-result command substitution that feeds a variable; added an inline comment so the hardening doesn't get refactored away.
+2. **Reassign scope was too narrow.** The loop iterated `ORIG_RUNNING` (apps that were `state == 'RUNNING'` at snapshot time). Apps in DEPLOYING/STOPPED/CRASHED at snapshot but with `MIG-*` UUIDs persisted in config were skipped entirely — those would fail to start next boot. Loop now iterates `app.query` for all apps and reassigns any with a `MIG-*` UUID in config regardless of state. The restart loop still uses `ORIG_RUNNING` (correct: only restart what was previously running).
+3. **`docker.update '{"nvidia": true}'` race with the preceding `false` job.** Fire-and-forget `midclt call docker.update` returned before the docker subsystem had finished applying the `nvidia: false` transition; the immediately-following re-enable was rejected. Switched both `docker.update` calls to `midclt call -j` so they block on the job, and wrapped the re-enable in a 5× retry-with-3s-backoff that re-queries `docker.config.nvidia` after each attempt. Self-heals both the docker-mid-transition reject and the post-boot ~10-min middleware boot-window.
+
 ## Uninstall tears down MIG runtime state (instances, mode, app assignments)
 
 Hardware-test finding: the unified `uninstall-nvidia-mig` (released in the prior changelog entry below) removed the **sysext + PREINIT + persist files**, but left:

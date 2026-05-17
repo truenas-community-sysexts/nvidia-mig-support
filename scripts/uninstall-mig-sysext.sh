@@ -183,7 +183,8 @@ if [ -x /usr/bin/nvidia-smi ] && command -v midclt >/dev/null 2>&1; then
         # at the end re-establishes the prior set of running apps.
 
         # Snapshot the names of every app currently RUNNING (no schema
-        # dependency on GPU fields).
+        # dependency on GPU fields). `|| true` defends against the same
+        # pipefail+set -e abort pattern documented in the reassign loop.
         ORIG_RUNNING=$(midclt call app.query 2>/dev/null | python3 -c "
 import sys, json
 try:
@@ -191,7 +192,7 @@ try:
         if a.get('state') == 'RUNNING':
             print(a.get('name', ''))
 except Exception:
-    pass" 2>/dev/null)
+    pass" 2>/dev/null || true)
         if [ -n "$ORIG_RUNNING" ]; then
             echo "  Apps currently RUNNING (will be restarted after teardown):"
             while IFS= read -r app; do
@@ -202,10 +203,12 @@ except Exception:
         fi
 
         # Sledgehammer-stop: nvidia=false stops every container that uses
-        # the nvidia runtime, no per-app config inspection needed.
+        # the nvidia runtime, no per-app config inspection needed. Use `-j`
+        # to block until docker actually applies the change (otherwise the
+        # GPU-drain check below races the still-in-flight reconfig).
         echo ""
         echo "  Disabling Apps' NVIDIA toggle to drain all GPU consumers..."
-        midclt call docker.update '{"nvidia": false}' >/dev/null 2>&1 \
+        midclt call -j docker.update '{"nvidia": false}' >/dev/null 2>&1 \
             || echo "  WARN: docker.update '{\"nvidia\": false}' returned an error — continuing"
 
         # Drain GPU compute processes before destroying MIG instances.
@@ -247,29 +250,45 @@ except Exception:
             echo "        Then: 'sudo midclt call -j app.stop <name>' and re-run uninstall."
         fi
 
-        # Re-enable docker.nvidia so apps can come back. If uptime is < 10
-        # min this may be silently rejected by middleware (the boot-window
-        # — see install-mig-sysext.sh's long comment), but in the typical
-        # uninstall scenario uptime is well past that. The verify below
-        # surfaces if it didn't stick.
+        # Re-enable docker.nvidia so apps can come back. Two issues to handle:
+        #
+        # 1. The previous `docker.update '{"nvidia": false}'` is a job that
+        #    takes time to apply (docker has to stop the affected containers
+        #    and reconfigure the runtime). A fire-and-forget re-enable
+        #    immediately after the disable gets rejected because docker is
+        #    still mid-transition. Use `-j` to block on each docker.update
+        #    job until it finishes.
+        #
+        # 2. If uptime is < 10 min, middleware may silently reject re-enable
+        #    (boot-window — see install-mig-sysext.sh's long comment). In
+        #    practice the typical uninstall scenario is well past 10 min,
+        #    but the retry loop below makes both cases self-healing for
+        #    transient rejects.
         echo ""
         echo "  Re-enabling Apps' NVIDIA toggle..."
-        midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 \
-            || echo "  WARN: docker.update '{\"nvidia\": true}' returned an error"
-        NVIDIA_TOGGLE_AFTER=$(midclt call docker.config 2>/dev/null \
-            | python3 -c "
+        NVIDIA_TOGGLE_AFTER=""
+        for retry in 1 2 3 4 5; do
+            midclt call -j docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+            NVIDIA_TOGGLE_AFTER=$(midclt call docker.config 2>/dev/null \
+                | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
     print('true' if d.get('nvidia') else 'false')
 except Exception:
-    pass" 2>/dev/null)
+    pass" 2>/dev/null || true)
+            if [ "$NVIDIA_TOGGLE_AFTER" = "true" ]; then
+                break
+            fi
+            printf "    re-enable attempt %d/5 returned '%s', retrying in 3s...\n" "$retry" "${NVIDIA_TOGGLE_AFTER:-unknown}"
+            sleep 3
+        done
         if [ "$NVIDIA_TOGGLE_AFTER" = "true" ]; then
             echo "  Verified: docker.config.nvidia=true"
         else
-            echo "  WARN: docker.config.nvidia is still '${NVIDIA_TOGGLE_AFTER:-unknown}'."
+            echo "  WARN: docker.config.nvidia is still '${NVIDIA_TOGGLE_AFTER:-unknown}' after 5 retries."
             echo "        Probably the boot-window (re-enable rejected for ~10 min after boot)."
-            echo "        Re-run: 'sudo midclt call docker.update {\"nvidia\": true}' once uptime > 10 min."
+            echo "        Re-run: 'sudo midclt call -j docker.update {\"nvidia\": true}' once uptime > 10 min."
         fi
 
         # Reassign any app whose persisted nvidia_gpu_selection.<slot>.uuid
@@ -279,19 +298,40 @@ except Exception:
         # action`. Rewrite to the full-GPU UUID on the same PCI slot so the
         # app comes back up cleanly with whole-GPU access.
         #
+        # Walk EVERY app (not just ORIG_RUNNING) because a stale MIG-* UUID
+        # in config is bad regardless of whether the app was running at
+        # snapshot time — STOPPED/CRASHED/DEPLOYING apps will fail next
+        # boot otherwise.
+        #
         # Schema path was verified empirically (see CHANGELOG):
         #   midclt call app.config <name>
         #     → resources.gpus.nvidia_gpu_selection.<slot>.{use_gpu, uuid}
         # `app.query` doesn't return this data — must use `app.config <name>`.
+        #
+        # Robustness note: each `midclt call app.config <name>` is wrapped
+        # in `|| true` because `set -e` + `pipefail` would otherwise abort
+        # the entire uninstall if a single app's config read fails (e.g.
+        # an app mid-deploy returns an error). A previous version of this
+        # script silently aborted here mid-loop; do not regress.
         FULL_GPU_UUID_FOR_REASSIGN=$(/usr/bin/nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null \
             | head -1 | tr -d '[:space:]' || true)
-        if [ -n "$ORIG_RUNNING" ] && [ -n "$FULL_GPU_UUID_FOR_REASSIGN" ]; then
+        ALL_APPS=$(midclt call app.query 2>/dev/null | python3 -c "
+import sys, json
+try:
+    for a in json.load(sys.stdin):
+        n = a.get('name', '')
+        if n: print(n)
+except Exception:
+    pass" 2>/dev/null || true)
+        if [ -n "$ALL_APPS" ] && [ -n "$FULL_GPU_UUID_FOR_REASSIGN" ]; then
             echo ""
             echo "  Reassigning apps that still point at MIG-* UUIDs..."
+            REASSIGN_COUNT=0
             while IFS= read -r app; do
                 [ -z "$app" ] && continue
                 # Returns "slot|uuid" on the first MIG-* UUID found, empty otherwise.
-                mig_info=$(midclt call app.config "$app" 2>/dev/null | python3 -c "
+                config_json=$(midclt call app.config "$app" 2>/dev/null || true)
+                mig_info=$(printf '%s' "$config_json" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -304,8 +344,9 @@ try:
                 print(f'{slot}|{uuid}')
                 break
 except Exception:
-    pass" 2>/dev/null)
+    pass" 2>/dev/null || true)
                 if [ -n "$mig_info" ]; then
+                    REASSIGN_COUNT=$((REASSIGN_COUNT + 1))
                     slot="${mig_info%|*}"
                     old_uuid="${mig_info#*|}"
                     payload="{\"values\":{\"resources\":{\"gpus\":{\"use_all_gpus\":false,\"nvidia_gpu_selection\":{\"${slot}\":{\"use_gpu\":true,\"uuid\":\"${FULL_GPU_UUID_FOR_REASSIGN}\"}}}}}}"
@@ -316,7 +357,10 @@ except Exception:
                         echo "    Reassigning $app... WARN (${ELAPSED}s): $CAPTURED_OUT"
                     fi
                 fi
-            done <<<"$ORIG_RUNNING"
+            done <<<"$ALL_APPS"
+            if [ "$REASSIGN_COUNT" -eq 0 ]; then
+                echo "    (no apps held MIG-* UUIDs — nothing to reassign)"
+            fi
         elif [ -z "$FULL_GPU_UUID_FOR_REASSIGN" ]; then
             echo "  WARN: could not read full-GPU UUID from nvidia-smi — skipping app reassign"
             echo "        Apps with persisted MIG-* UUIDs may fail to start; check 'sudo midclt call app.config <name>'"
@@ -326,6 +370,10 @@ except Exception:
         # may have come back automatically when nvidia=true was set; we
         # check current state first and only start if still not RUNNING,
         # which makes this idempotent.
+        #
+        # Same `|| true` hardening as the reassign loop above: a single
+        # midclt failure here must not abort the script before sysext
+        # unmerge, PREINIT deregister, and persist cleanup run.
         if [ -n "$ORIG_RUNNING" ]; then
             echo ""
             echo "  Restarting apps that were RUNNING pre-teardown..."
@@ -334,7 +382,7 @@ except Exception:
                 cur_state=$(midclt call app.get_instance "$app" 2>/dev/null \
                     | python3 -c "import sys,json
 try: print(json.load(sys.stdin).get('state',''))
-except: print('')" 2>/dev/null)
+except: print('')" 2>/dev/null || true)
                 if [ "$cur_state" = "RUNNING" ]; then
                     echo "    $app: already RUNNING — no-op"
                 else
