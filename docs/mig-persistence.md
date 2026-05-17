@@ -112,7 +112,7 @@ After a TrueNAS update the first boot is longer (the restore dance adds 5–10 s
 
 | Script | What it undoes |
 | --- | --- |
-| `uninstall-mig-sysext.sh` *(bundled as `/usr/bin/uninstall-nvidia-mig`)* | Auto-detects state. **MIG-only**: removes `/etc/extensions/nvidia-mig.raw` symlink, re-merges sysext, deregisters MIG PREINIT — stock driver untouched, no reboot. **MIG + custom driver**: also stops apps, drains GPU, restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters the driver PREINIT — **reboot required** to load matching kernel modules. The stock backup is preserved across uninstalls. |
+| `uninstall-mig-sysext.sh` *(bundled as `/usr/bin/uninstall-nvidia-mig`)* | Auto-detects state. **MIG-only**: removes `/etc/extensions/nvidia-mig.raw` symlink, re-merges sysext, deregisters MIG PREINIT — stock driver untouched, no reboot. **MIG + custom driver**: also stops apps, drains GPU, restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters the driver PREINIT — **reboot required** to load matching kernel modules. The stock backup is preserved across uninstalls. **Plus** (when MIG mode is currently Enabled on the GPU, either path): tears down the runtime side of MIG — apps with `MIG-*` UUIDs in `nvidia_gpu_selection` get reassigned to the full-GPU UUID on the same PCI slot, MIG instances destroyed, MIG mode disabled, `mig.conf` cleaned from the persist dir. Without this teardown, apps would fail to start post-reboot with a stale-UUID error. |
 | `recover-stock-nvidia.sh` | Extracts a fresh stock `nvidia.raw` from the official TrueNAS `.update` archive (two-level squashfs peel). Use when no `nvidia-original.raw` backup exists. |
 
 ## Why this design
