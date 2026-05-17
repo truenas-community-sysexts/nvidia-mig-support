@@ -415,25 +415,127 @@ MIG_PROFILES="$MIG_PROFILES"
 EOF
 echo "Wrote $PERSIST_DIR/mig.conf"
 
-# --- Stop app services so GPU is free ---
-# "App services" is the user-facing name for what TrueNAS calls Docker
-# internally; the middleware endpoint is still `docker.update`.
+# --- Stop apps holding the GPU so MIG creation can proceed ---
+#
+# Two-step eviction. The docker.update '{"nvidia": false}' toggle alone is
+# not enough: it reconfigures the docker runtime for *future* container
+# starts but doesn't kill already-running containers. Containers with open
+# CUDA / NVENC / NVDEC contexts (Frigate's ffmpeg is the canonical case)
+# keep holding the GPU, `nvidia-smi mig -cgi` then fails with
+# "In use by another client", and the user gets a misleading post-check
+# error. See uninstall-mig-sysext.sh for the same pattern.
+#
+# Step 1: per-app app.stop for everything with nvidia_gpu_selection set.
+#         Broader than uninstall's MIG-only filter — on first run, apps
+#         are bound to the full-GPU UUID, not MIG-* UUIDs.
+# Step 2: docker.update toggle as belt-and-suspenders.
+# Step 3: short drain poll; on timeout abort with a diagnostic dump
+#         instead of falling through to a guaranteed-failed create.
 echo ""
-echo "Stopping app services to free the GPU..."
-midclt call docker.update '{"nvidia": false}' >/dev/null \
-    || echo "WARN: app services API call (docker.update) returned an error — middleware may be flapping"
+echo "Stopping GPU-bound apps to free the GPU..."
+echo "  Scanning apps for GPU assignments..."
 
-printf "  Waiting for GPU to be released... 0s/120s"
-for attempt in $(seq 1 24); do
+# `|| true` on every middleware command substitution: `set -e` + pipefail
+# would otherwise abort the whole script if any single app's config read
+# fails (mid-deploy, crashed, transient middleware error).
+ALL_APPS=$(midclt call app.query 2>/dev/null | python3 -c "
+import sys, json
+try:
+    for a in json.load(sys.stdin):
+        n = a.get('name', '')
+        s = a.get('state', '')
+        if n: print(f'{n}|{s}')
+except Exception:
+    pass" 2>/dev/null || true)
+
+GPU_APPS_INFO=""  # name|state lines for apps with any nvidia_gpu_selection
+if [ -n "$ALL_APPS" ]; then
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        app="${line%|*}"
+        state="${line#*|}"
+        config_json=$(midclt call app.config "$app" 2>/dev/null || true)
+        is_gpu=$(printf '%s' "$config_json" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    gpus = (d.get('resources', {}) or {}).get('gpus', {}) or {}
+    sel = gpus.get('nvidia_gpu_selection', {}) or {}
+    for slot, cfg in sel.items():
+        if isinstance(cfg, dict) and cfg.get('uuid'):
+            print('y')
+            break
+except Exception:
+    pass" 2>/dev/null || true)
+        if [ "$is_gpu" = "y" ]; then
+            GPU_APPS_INFO+="$app|$state"$'\n'
+        fi
+    done <<<"$ALL_APPS"
+fi
+
+if [ -z "$GPU_APPS_INFO" ]; then
+    echo "  No GPU-bound apps found"
+else
+    echo "  GPU-bound apps (will be stopped to release CUDA/NVENC contexts):"
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        IFS='|' read -r gapp gstate <<<"$line"
+        echo "    $gapp (state=$gstate)"
+    done <<<"$GPU_APPS_INFO"
+
+    echo ""
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        IFS='|' read -r app state <<<"$line"
+        if [ "$state" != "RUNNING" ]; then
+            echo "  $app: state=$state — no container to stop"
+            continue
+        fi
+        if run_with_elapsed_capture "  Stopping $app" midclt call -j app.stop "$app"; then
+            echo "  Stopping $app... OK (${ELAPSED}s)"
+        else
+            echo "  Stopping $app... WARN (${ELAPSED}s): $CAPTURED_OUT"
+        fi
+    done <<<"$GPU_APPS_INFO"
+fi
+
+echo ""
+echo "  Disabling nvidia toolkit for docker (belt-and-suspenders)..."
+midclt call docker.update '{"nvidia": false}' >/dev/null \
+    || echo "  WARN: docker.update returned an error — middleware may be flapping"
+
+# Short drain: app.stop -j already blocked on container teardown, so this
+# only catches the brief window where the driver hasn't released CUDA
+# contexts yet. If it expires the holder is something app.stop can't
+# manage (bare CUDA process, manual nvidia-smi, jail/VM passthrough).
+printf "  Waiting for GPU clients to release... 0s/30s"
+N=0
+for attempt in $(seq 1 10); do
     N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
     if [ "${N:-0}" -eq 0 ]; then
-        printf "\r  GPU released                                            \n"
+        printf "\r  GPU clients released                                    \n"
         break
     fi
-    printf "\r  Waiting for %d GPU process(es)... %ds/120s" "$N" "$((attempt * 5))"
-    sleep 5
+    printf "\r  Waiting for %d GPU process(es)... %ds/30s" "$N" "$((attempt * 3))"
+    sleep 3
 done
-[ "${attempt:-0}" -eq 24 ] && echo ""
+
+if [ "${N:-0}" -gt 0 ]; then
+    echo ""
+    echo "ERROR: GPU still has $N compute process(es) attached after 30s." >&2
+    echo "       MIG instance creation would fail with 'In use by another client'." >&2
+    echo "" >&2
+    echo "       Processes holding the GPU:" >&2
+    /usr/bin/nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv 2>&1 \
+        | sed 's/^/         /' >&2 || true
+    echo "" >&2
+    echo "       Likely causes: a non-app process is using the GPU (bare CUDA," >&2
+    echo "       manual nvidia-smi, jail/VM passthrough)." >&2
+    echo "" >&2
+    echo "       Re-enabling nvidia toolkit so apps come back, then exiting." >&2
+    midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+    exit 1
+fi
 
 # --- Run nvidia-mig-setup.service (destroys + creates MIG instances) ---
 # Must use 'restart', not 'start'. The service is Type=oneshot with
@@ -526,7 +628,15 @@ mapfile -t MIG_LIST_UUIDS < <(/usr/bin/nvidia-smi -L 2>/dev/null \
     | sed -nE 's/.*Device[[:space:]]+[0-9]+:[[:space:]]*\(UUID:[[:space:]]*(MIG-[^)]+)\).*/\1/p')
 
 if [ "${#MIG_LGI_LINES[@]}" -eq 0 ]; then
-    echo "ERROR: 'nvidia-smi mig -lgi' returned no GPU instances. Check journalctl -u nvidia-mig-setup." >&2
+    # The systemd unit is Type=oneshot RemainAfterExit=yes, so `systemctl
+    # restart` returns 0 even when the inner `nvidia-smi mig -cgi` call
+    # fails. Surface the real reason inline so the user doesn't have to
+    # chase it through journalctl.
+    echo "ERROR: 'nvidia-smi mig -lgi' returned no GPU instances." >&2
+    echo "       The nvidia-mig-setup service ran but failed to create instances." >&2
+    echo "       Last 20 lines from the service journal:" >&2
+    journalctl -u nvidia-mig-setup --no-pager -n 20 2>/dev/null \
+        | sed 's/^/         /' >&2 || true
     exit 1
 fi
 if [ "${#MIG_LIST_UUIDS[@]}" -ne "${#MIG_LGI_LINES[@]}" ]; then
