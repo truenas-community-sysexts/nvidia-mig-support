@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Configure MIG layout + map MIG devices to TrueNAS apps.
 #
-# Runs after install-mig-sysext.sh (lightweight path) or after the reboot
-# following install-nvidia-sysext.sh (full-driver path). Either path is
-# fine — by the time configure-mig.sh runs, /usr/bin/nvidia-smi must work
-# and middleware must be up.
+# Runs after install-sysext.sh (default path: no reboot) or after the
+# reboot following install-sysext.sh --with-driver. Either path is fine —
+# by the time configure-mig.sh runs, /usr/bin/nvidia-smi must work and
+# middleware must be up.
 #
 # Usage:
 #   sudo ./configure-mig.sh                        # interactive: prompt for profiles
@@ -124,6 +124,63 @@ validate_mig_profiles() {
     $ok
 }
 
+# --- Live-elapsed wrappers for long-blocking commands ---
+# midclt's `app.stop` / `app.update` / `app.start` and `systemctl restart`
+# of the MIG service can each take 5–60 s; without a counter the screen
+# looks frozen. These wrappers spawn a background ticker that prints
+# "<label>... Ns" once a second, run the command, and clear the line on
+# return. `ELAPSED` (and `CAPTURED_OUT` for the _capture variant) is set
+# in the caller's scope so it can print a final "OK (Ns)" / "FAILED (Ns)"
+# line.
+ELAPSED=0
+CAPTURED_OUT=""
+
+run_with_elapsed() {
+    # Args: label (with own indent), then command...
+    # Command's stdout/stderr pass through. Sets ELAPSED.
+    local label="$1"; shift
+    local start ticker_pid rc
+    start=$(date +%s)
+    (
+        while sleep 1; do
+            printf "\r%s... %ds" "$label" "$(($(date +%s) - start))"
+        done
+    ) &
+    ticker_pid=$!
+    "$@"
+    rc=$?
+    kill "$ticker_pid" 2>/dev/null
+    wait "$ticker_pid" 2>/dev/null
+    ELAPSED=$(($(date +%s) - start))
+    # Clear the live line so the caller's print replaces it.
+    printf "\r%80s\r" ""
+    return $rc
+}
+
+run_with_elapsed_capture() {
+    # Like run_with_elapsed but captures combined stdout+stderr into
+    # CAPTURED_OUT (so the caller can echo error text on failure).
+    local label="$1"; shift
+    local start outfile ticker_pid rc
+    start=$(date +%s)
+    outfile=$(mktemp)
+    (
+        while sleep 1; do
+            printf "\r%s... %ds" "$label" "$(($(date +%s) - start))"
+        done
+    ) &
+    ticker_pid=$!
+    "$@" >"$outfile" 2>&1
+    rc=$?
+    kill "$ticker_pid" 2>/dev/null
+    wait "$ticker_pid" 2>/dev/null
+    ELAPSED=$(($(date +%s) - start))
+    CAPTURED_OUT=$(cat "$outfile")
+    rm -f "$outfile"
+    printf "\r%80s\r" ""
+    return $rc
+}
+
 profile_label() {
     # Engine counts straight from `nvidia-smi mig -lgip` on Blackwell.
     # "1 dec/enc/jpg" = 1 NVDEC + 1 NVENC + 1 NVJPG per instance.
@@ -144,11 +201,10 @@ profile_label() {
 }
 
 # --- Resolve persistent dir ---
-# resolve_persist_dir is duplicated verbatim across install-mig-sysext.sh,
-# install-nvidia-sysext.sh, configure-mig.sh, and recover-stock-nvidia.sh.
-# Inline (rather than sourced from a sibling file) so each script remains
-# a self-contained curl|bash artifact. Keep these copies in sync when
-# changing the function.
+# resolve_persist_dir is duplicated verbatim across install-sysext.sh,
+# configure-mig.sh, and recover-stock-nvidia.sh. Inline (rather than
+# sourced from a sibling file) so each script remains a self-contained
+# curl|bash artifact. Keep these copies in sync when changing the function.
 resolve_persist_dir() {
     PERSIST_DIR=""
     local d p
@@ -247,8 +303,8 @@ else
     if echo "$NVIDIA_ERR" | grep -qi "version mismatch"; then
         echo "" >&2
         echo "ERROR: kernel modules and userspace libraries are different driver versions." >&2
-        echo "       This is expected immediately after install-nvidia-sysext.sh and" >&2
-        echo "       resolves itself after a reboot loads matching kernel modules." >&2
+        echo "       This is expected immediately after 'install-sysext.sh --with-driver'" >&2
+        echo "       and resolves itself after a reboot loads matching kernel modules." >&2
         echo "" >&2
         echo "       Reboot first, then re-run configure-mig:" >&2
         echo "" >&2
@@ -335,19 +391,25 @@ MIG_PROFILES="$MIG_PROFILES"
 EOF
 echo "Wrote $PERSIST_DIR/mig.conf"
 
-# --- Stop Docker so GPU is free ---
+# --- Stop app services so GPU is free ---
+# "App services" is the user-facing name for what TrueNAS calls Docker
+# internally; the middleware endpoint is still `docker.update`.
 echo ""
-echo "Stopping Docker to free the GPU..."
+echo "Stopping app services to free the GPU..."
 midclt call docker.update '{"nvidia": false}' >/dev/null \
-    || echo "WARN: docker.update returned an error (middleware may be flapping)"
+    || echo "WARN: app services API call (docker.update) returned an error — middleware may be flapping"
 
+printf "  Waiting for GPU to be released... 0s/120s"
 for attempt in $(seq 1 24); do
     N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
-    [ "${N:-0}" -eq 0 ] && { echo "GPU released"; break; }
+    if [ "${N:-0}" -eq 0 ]; then
+        printf "\r  GPU released                                            \n"
+        break
+    fi
     printf "\r  Waiting for %d GPU process(es)... %ds/120s" "$N" "$((attempt * 5))"
     sleep 5
 done
-echo ""
+[ "${attempt:-0}" -eq 24 ] && echo ""
 
 # --- Run nvidia-mig-setup.service (destroys + creates MIG instances) ---
 # Must use 'restart', not 'start'. The service is Type=oneshot with
@@ -355,30 +417,37 @@ echo ""
 # a no-op and the old MIG instances remain. `restart` forces re-execution,
 # which re-reads mig.conf and applies the new profile list.
 echo "Restarting nvidia-mig-setup.service (re-running with new profiles)..."
-systemctl restart nvidia-mig-setup.service || { echo "ERROR: systemctl restart failed"; exit 1; }
+if run_with_elapsed "  elapsed" systemctl restart nvidia-mig-setup.service; then
+    echo "  done (${ELAPSED}s)"
+else
+    echo "ERROR: systemctl restart failed after ${ELAPSED}s"
+    exit 1
+fi
 systemctl status nvidia-mig-setup.service --no-pager -n 0 | head -3 || true
 
-# --- Re-enable Docker ---
+# --- Re-enable app services ---
 echo ""
-echo "Re-enabling Docker..."
-midclt call docker.update '{"nvidia": true}' >/dev/null || echo "WARN: docker.update re-enable failed"
+echo "Re-enabling app services..."
+midclt call docker.update '{"nvidia": true}' >/dev/null \
+    || echo "WARN: app services API call (docker.update) re-enable failed"
 
 # --- Wait for apps to come back so we can list them ---
-echo "Waiting for app service to come back (60-90s)..."
+echo "Waiting for app services to come back (60-90s)..."
 APP_COUNT=0
+printf "  Waiting... 0s/90s"
 for attempt in $(seq 1 18); do
     APP_COUNT=$(midclt call app.query 2>/dev/null \
         | python3 -c "import sys,json
 try: print(len(json.load(sys.stdin)))
 except: print(0)" 2>/dev/null)
     if [ "${APP_COUNT:-0}" -gt 0 ]; then
-        echo "App service ready (${APP_COUNT} apps)"
+        printf "\r  App services ready (${APP_COUNT} apps)                  \n"
         break
     fi
     printf "\r  Waiting... %ds/90s" "$((attempt * 5))"
     sleep 5
 done
-echo ""
+[ "${attempt:-0}" -eq 18 ] && echo ""
 
 # --- Enumerate created MIG instances ---
 mapfile -t MIG_UUIDS < <(/usr/bin/nvidia-smi -L 2>/dev/null \
@@ -579,21 +648,19 @@ except: print('')" 2>/dev/null)
     [ "$orig_state" = "RUNNING" ] && was_running=true
 
     if $was_running; then
-        printf "    Stopping..."
-        if err=$(midclt call -j app.stop "$app" 2>&1); then
-            echo " OK"
+        if run_with_elapsed_capture "    Stopping" midclt call -j app.stop "$app"; then
+            echo "    Stopping... OK (${ELAPSED}s)"
         else
-            echo " WARN (continuing): $err"
+            echo "    Stopping... WARN (continuing, ${ELAPSED}s): $CAPTURED_OUT"
         fi
     fi
 
-    printf "    Applying GPU config..."
     payload="{\"values\":{\"resources\":{\"gpus\":{\"use_all_gpus\":false,\"nvidia_gpu_selection\":{\"$PCI_SLOT\":{\"use_gpu\":true,\"uuid\":\"${STAGED_UUID[$i]}\"}}}}}}"
-    if err=$(midclt call -j app.update "$app" "$payload" 2>&1); then
-        echo " OK"
+    if run_with_elapsed_capture "    Applying GPU config" midclt call -j app.update "$app" "$payload"; then
+        echo "    Applying GPU config... OK (${ELAPSED}s)"
     else
-        echo " FAILED:"
-        echo "$err" | sed 's/^/      /'
+        echo "    Applying GPU config... FAILED (${ELAPSED}s):"
+        echo "$CAPTURED_OUT" | sed 's/^/      /'
         # Restore the app to its original state on failure — only start it
         # back up if it was actually running before we touched it.
         if $was_running; then
@@ -603,11 +670,10 @@ except: print('')" 2>/dev/null)
     fi
 
     if $was_running; then
-        printf "    Starting..."
-        if err=$(midclt call -j app.start "$app" 2>&1); then
-            echo " OK"
+        if run_with_elapsed_capture "    Starting" midclt call -j app.start "$app"; then
+            echo "    Starting... OK (${ELAPSED}s)"
         else
-            echo " WARN: $err"
+            echo "    Starting... WARN (${ELAPSED}s): $CAPTURED_OUT"
         fi
     else
         echo "    Leaving stopped (was not running originally)"

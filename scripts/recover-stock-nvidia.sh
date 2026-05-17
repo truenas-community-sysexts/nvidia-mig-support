@@ -53,11 +53,10 @@ case "$VERSION" in
 esac
 
 # --- Resolve persistent storage location ---
-# resolve_persist_dir is duplicated verbatim across install-mig-sysext.sh,
-# install-nvidia-sysext.sh, configure-mig.sh, and recover-stock-nvidia.sh.
-# Inline (rather than sourced from a sibling file) so each script remains
-# a self-contained curl|bash artifact. Keep these copies in sync when
-# changing the function.
+# resolve_persist_dir is duplicated verbatim across install-sysext.sh,
+# configure-mig.sh, and recover-stock-nvidia.sh. Inline (rather than
+# sourced from a sibling file) so each script remains a self-contained
+# curl|bash artifact. Keep these copies in sync when changing the function.
 resolve_persist_dir() {
     PERSIST_DIR=""
     local d p
@@ -203,7 +202,8 @@ elif [ "$STOCK_SIZE" -gt 700000000 ]; then
     echo "WARN: extracted nvidia.raw is unexpectedly large (${STOCK_SIZE} bytes); verify before installing"
 fi
 
-# --- 4. Stage as nvidia-original.raw for uninstall-nvidia-sysext.sh next time ---
+# --- 4. Stage as nvidia-original.raw for `install-sysext.sh --with-driver` ---
+#       (and for uninstall-nvidia-sysext.sh to restore from later) ---
 cp "$STOCK" "${PERSIST}/nvidia-original.raw"
 echo ""
 echo "Staged: ${PERSIST}/nvidia-original.raw"

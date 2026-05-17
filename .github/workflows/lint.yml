@@ -30,13 +30,12 @@ jobs:
           shellcheck --severity=warning \
             scripts/build-nvidia-sysext.sh \
             scripts/build-mig-sysext.sh \
-            scripts/install-nvidia-sysext.sh \
-            scripts/install-mig-sysext.sh \
+            scripts/install-sysext.sh \
             scripts/uninstall-nvidia-sysext.sh \
             scripts/uninstall-mig-sysext.sh \
             scripts/configure-mig.sh \
             scripts/recover-stock-nvidia.sh \
-            scripts/nvidia-preinit-full.sh \
+            scripts/nvidia-preinit-driver.sh \
             .github/scripts/*.sh
 
   tracked-versions:

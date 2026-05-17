@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Build a full-driver nvidia.raw sysext for TrueNAS — replaces the stock
-# nvidia sysext with a chosen NVIDIA driver version, bundled with the MIG
-# setup script + service unit so the result is a single self-contained
-# extension.
+# Build a driver-only nvidia.raw sysext for TrueNAS — replaces the stock
+# nvidia sysext with a chosen NVIDIA driver version. No MIG tooling, no
+# preinit logic: those live in nvidia-mig.raw (built separately by
+# build-mig-sysext.sh) and are installed independently. See
+# install-sysext.sh --with-driver to install both atomically.
 #
 # Port of https://github.com/biohazardious/truenas-nvidia-driver-updater
 # entrypoint.sh, adapted to run directly on a fresh Debian/Ubuntu host
@@ -16,8 +17,7 @@
 #        [--truenas-codename=Goldeye] \
 #        [--build-cc=gcc-14] \
 #        [--update-file=/path/to/preloaded.update] \
-#        [--out=dist] \
-#        [--no-mig-bundle]
+#        [--out=dist]
 #
 # Output:
 #   <out>/nvidia.raw
@@ -33,7 +33,6 @@ TRUENAS_VERSION="${TRUENAS_VERSION:-}"
 NVIDIA_KERNEL_MODULE_TYPE="${NVIDIA_KERNEL_MODULE_TYPE:-open}"
 TRUENAS_CODENAME="${TRUENAS_CODENAME:-}"
 NVIDIA_BUILD_CC="${NVIDIA_BUILD_CC:-}"
-BUNDLE_MIG=true
 UPDATE_FILE_OVERRIDE=""
 OUT_DIR=""
 
@@ -46,7 +45,6 @@ for arg in "$@"; do
         --build-cc=*) NVIDIA_BUILD_CC="${arg#*=}" ;;
         --update-file=*) UPDATE_FILE_OVERRIDE="${arg#*=}" ;;
         --out=*) OUT_DIR="${arg#*=}" ;;
-        --no-mig-bundle) BUNDLE_MIG=false ;;
         -h|--help)
             sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
@@ -138,7 +136,7 @@ write_extension_release() {
 # ─────────────────────────────────────────────────────────────────────────────
 # Pre-flight
 # ─────────────────────────────────────────────────────────────────────────────
-banner "NVIDIA full-driver sysext builder for TrueNAS"
+banner "NVIDIA driver-only sysext builder for TrueNAS"
 
 if [ "$(id -u)" -ne 0 ]; then
     die "Must run as root (kernel-module compile + /usr writes)"
@@ -150,7 +148,6 @@ done
 
 info "NVIDIA driver        : $NVIDIA_VERSION ($NVIDIA_KERNEL_MODULE_TYPE)"
 info "TrueNAS version      : $TRUENAS_VERSION${TRUENAS_CODENAME:+ ($TRUENAS_CODENAME)}"
-info "Bundle MIG tooling   : $BUNDLE_MIG"
 info "Output dir           : $OUT_DIR"
 
 # Clean any leftover state from a prior run
@@ -475,30 +472,19 @@ MAIN_KO=$(find "$STAGING_DIR" -name 'nvidia.ko' -not -name 'nvidia-*.ko' -type f
 ok "Main nvidia.ko at: $MAIN_KO"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 5b — Bundle MIG tooling (so this nvidia.raw is self-sufficient)
+# PHASE 5b — Bundle the driver-side uninstaller for local use after merge
 # ─────────────────────────────────────────────────────────────────────────────
-if $BUNDLE_MIG; then
-    banner "Phase 5b: Bundle MIG tooling"
-    mkdir -p "$STAGING_DIR/usr/bin" "$STAGING_DIR/usr/lib/systemd/system"
-    cp "$REPO_ROOT/sysext/usr/bin/nvidia-mig-setup" "$STAGING_DIR/usr/bin/nvidia-mig-setup"
-    chmod 0755 "$STAGING_DIR/usr/bin/nvidia-mig-setup"
-    cp "$REPO_ROOT/sysext/usr/lib/systemd/system/nvidia-mig-setup.service" \
-       "$STAGING_DIR/usr/lib/systemd/system/nvidia-mig-setup.service"
-    chmod 0644 "$STAGING_DIR/usr/lib/systemd/system/nvidia-mig-setup.service"
-    # Bundle the user-facing config helper at /usr/bin/configure-mig so
-    # it's available locally once the sysext is merged — no network needed.
-    cp "$REPO_ROOT/scripts/configure-mig.sh" "$STAGING_DIR/usr/bin/configure-mig"
-    chmod 0755 "$STAGING_DIR/usr/bin/configure-mig"
-    # Bundle the uninstall script at /usr/bin/uninstall-nvidia-driver so
-    # users can revert to stock with `sudo uninstall-nvidia-driver` instead
-    # of a curl|bash. Bash reads the script into memory at parse time, so
-    # the script keeps running fine after the sysext is unmerged mid-flow.
-    cp "$REPO_ROOT/scripts/uninstall-nvidia-sysext.sh" "$STAGING_DIR/usr/bin/uninstall-nvidia-driver"
-    chmod 0755 "$STAGING_DIR/usr/bin/uninstall-nvidia-driver"
-    ok "MIG + configure-mig + uninstall-nvidia-driver bundled (PREINIT activation handled by install-nvidia-sysext.sh)"
-else
-    info "Skipping MIG bundle (--no-mig-bundle)"
-fi
+# The MIG tooling (configure-mig, nvidia-mig-setup.service, the MIG setup
+# binary) lives in nvidia-mig.raw — not here. nvidia.raw is driver-only.
+banner "Phase 5b: Bundle uninstall-nvidia-driver"
+mkdir -p "$STAGING_DIR/usr/bin"
+# Bundle the uninstall script at /usr/bin/uninstall-nvidia-driver so
+# users can revert to stock with `sudo uninstall-nvidia-driver` instead
+# of a curl|bash. Bash reads the script into memory at parse time, so
+# the script keeps running fine after the sysext is unmerged mid-flow.
+cp "$REPO_ROOT/scripts/uninstall-nvidia-sysext.sh" "$STAGING_DIR/usr/bin/uninstall-nvidia-driver"
+chmod 0755 "$STAGING_DIR/usr/bin/uninstall-nvidia-driver"
+ok "uninstall-nvidia-driver bundled"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 5c — Extension-release metadata (ID=_any, matches TrueNAS convention)
@@ -531,8 +517,8 @@ FINAL_SIZE=$(du -h "$OUT_PATH" | cut -f1)
 FINAL_BYTES=$(stat -c%s "$OUT_PATH")
 ok "nvidia.raw built: $FINAL_SIZE ($FINAL_BYTES bytes)"
 
-# Size sanity: stock TrueNAS 25.10.x nvidia.raw is ~420 MB. Our build with
-# MIG bundle should land in the same neighborhood; warn outside reasonable bounds.
+# Size sanity: stock TrueNAS 25.10.x nvidia.raw is ~420 MB. Our driver-only
+# build should land in the same neighborhood; warn outside reasonable bounds.
 if [ "$FINAL_BYTES" -lt 350000000 ]; then
     warn "Image is under 350 MB — may be missing components"
 elif [ "$FINAL_BYTES" -gt 700000000 ]; then
@@ -548,4 +534,3 @@ echo "  Kernel    : $KERNEL_VERSION"
 echo "  Modules   : $KO_COUNT .ko"
 echo "  Staged    : $STAGED_COUNT files"
 echo "  SHA256    : $(cut -d' ' -f1 "$OUT_PATH.sha256")"
-echo "  MIG       : $($BUNDLE_MIG && echo bundled || echo not-bundled)"

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Restore stock nvidia.raw from /mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw
-# and remove the full-driver PREINIT entry. Counterpart to install-nvidia-sysext.sh.
+# and remove the custom-driver PREINIT entry. Counterpart to
+# `install-sysext.sh --with-driver`. Leaves the MIG sysext (nvidia-mig.raw)
+# in place — it works on top of either the stock or a custom driver.
 #
 # This script is also bundled into the custom nvidia.raw as
 # /usr/bin/uninstall-nvidia-driver so users can run
@@ -42,15 +44,26 @@ done
 
 echo "=== Uninstall full-driver nvidia.raw ==="
 
-# --- Stop Docker, drain GPU ---
-echo "Stopping Docker..."
-midclt call docker.update '{"nvidia": false}' >/dev/null || true
+# --- Stop app services, drain GPU ---
+# "App services" is the user-facing name for what TrueNAS calls Docker
+# internally; the middleware endpoint is still `docker.update`.
+echo "Stopping app services..."
+midclt call docker.update '{"nvidia": false}' >/dev/null \
+    || echo "WARN: app services API call (docker.update) failed — continuing"
 if [ -x /usr/bin/nvidia-smi ]; then
-    for _ in $(seq 1 24); do
+    # Match the install script's visible-counter pattern so users see
+    # progress instead of an opaque pause.
+    printf "  Waiting for GPU to be released... 0s/120s"
+    for attempt in $(seq 1 24); do
         N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
-        [ "${N:-0}" -eq 0 ] && break
+        if [ "${N:-0}" -eq 0 ]; then
+            printf "\r  GPU released                                            \n"
+            break
+        fi
+        printf "\r  Waiting for %d GPU process(es)... %ds/120s" "$N" "$((attempt * 5))"
         sleep 5
     done
+    [ "${attempt:-0}" -eq 24 ] && echo ""
 fi
 
 # --- Restore stock if we have a backup, else just leave whatever's there ---
@@ -73,14 +86,14 @@ else
     echo "  (run recover-stock-nvidia.sh later to fetch one if needed)"
 fi
 
-# --- Deregister PREINIT ---
+# --- Deregister driver PREINIT (matches both new and legacy names) ---
 PREINIT_ID=$(midclt call initshutdownscript.query 2>/dev/null \
     | python3 -c "
 import sys, json
 try:
     for s in json.load(sys.stdin):
         cmd = (s.get('command') or '') + ' ' + (s.get('script') or '')
-        if 'nvidia-preinit-full' in cmd:
+        if 'nvidia-preinit-driver' in cmd or 'nvidia-preinit-full' in cmd:
             print(s['id'], end=''); break
 except Exception:
     pass
@@ -88,24 +101,100 @@ except Exception:
 
 if [ -n "$PREINIT_ID" ]; then
     midclt call initshutdownscript.delete "$PREINIT_ID" >/dev/null 2>&1 \
-        && echo "Deregistered PREINIT entry (id $PREINIT_ID)" \
+        && echo "Deregistered driver PREINIT entry (id $PREINIT_ID)" \
         || echo "WARN: deregister failed"
 else
-    echo "No matching PREINIT entry found"
+    echo "No matching driver PREINIT entry found"
 fi
 
 # --- Cleanup persistent storage ---
 if ! $KEEP_PERSIST && [ -n "$PERSIST_DIR" ]; then
-    rm -f "$PERSIST_DIR/nvidia.raw" "$PERSIST_DIR/nvidia-preinit-full.sh"
-    echo "Removed custom nvidia.raw and PREINIT script from $PERSIST_DIR"
-    echo "  (nvidia-original.raw kept — pass --keep-persist=false to also remove)"
+    rm -f "$PERSIST_DIR/nvidia.raw" \
+          "$PERSIST_DIR/nvidia-preinit-driver.sh" \
+          "$PERSIST_DIR/nvidia-preinit-full.sh"
+    echo "Removed custom nvidia.raw and driver PREINIT script from $PERSIST_DIR"
+    echo "  (nvidia-original.raw and nvidia-mig.raw kept — MIG sysext still works on stock driver)"
 fi
 
-# --- Re-enable Docker ---
-echo ""
-echo "Re-enabling Docker..."
-midclt call docker.update '{"nvidia": true}' >/dev/null || true
+# Attempt to re-enable Apps' NVIDIA toggle. Same query → set → verify
+# pattern as install-sysext.sh: empirically a blind docker.update can
+# silently fail to persist during the post-swap pre-reboot window on
+# some TrueNAS versions, leaving the Apps toggle off after reboot.
+# The exact mechanism isn't pinned down so we don't speculate in
+# user-facing output. Verifying via re-query gives us a reliable
+# signal regardless of cause. Keep in sync with install-sysext.sh.
+NVIDIA_REENABLE_OK=false
+attempt_nvidia_reenable() {
+    if ! command -v midclt >/dev/null 2>&1; then
+        echo "  midclt not available — skipping app-services re-enable"
+        return 1
+    fi
+
+    local current
+    current=$(midclt call docker.config 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print('true' if d.get('nvidia') else 'false')
+except Exception:
+    pass" 2>/dev/null)
+
+    if [ "$current" = "true" ]; then
+        echo "  app services nvidia toggle already on — no change needed"
+        return 0
+    fi
+
+    midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+
+    local after
+    after=$(midclt call docker.config 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print('true' if d.get('nvidia') else 'false')
+except Exception:
+    pass" 2>/dev/null)
+
+    if [ "$after" = "true" ]; then
+        echo "  app services nvidia toggle re-enabled (verified)"
+        return 0
+    fi
+    echo "  re-enable call did not persist (verified via re-query); see post-reboot instructions below"
+    return 1
+}
 
 echo ""
-echo "=== Uninstall complete ==="
-echo "REBOOT REQUIRED for kernel modules to reload at the matching driver version."
+echo "Re-enabling Apps' NVIDIA toggle..."
+if attempt_nvidia_reenable; then
+    NVIDIA_REENABLE_OK=true
+fi
+
+echo ""
+echo "=== Uninstall complete — REBOOT REQUIRED ==="
+echo ""
+echo "Kernel modules currently loaded are still the custom driver's."
+echo "After reboot, modules will load fresh from the stock sysext and"
+echo "match the userspace libs (no more NVML mismatch)."
+echo ""
+echo "Run: sudo reboot"
+if ! $NVIDIA_REENABLE_OK; then
+    echo ""
+    echo ">>> AFTER REBOOT — one-time step to make Apps see the GPU again <<<"
+    echo ""
+    echo "App services were turned off during uninstall (so we could swap"
+    echo "the driver). Auto re-enable was attempted but the change did NOT"
+    echo "persist (re-query verified). This is observable on some TrueNAS"
+    echo "versions during the pre-reboot window; the manual step below"
+    echo "works reliably once the box is back up."
+    echo ""
+    echo "Once the box is back up and 'nvidia-smi' shows the stock driver, run:"
+    echo ""
+    echo "  sudo midclt call docker.update '{\"nvidia\": true}'"
+    echo ""
+    echo "  -- or --"
+    echo ""
+    echo "  Toggle the 'Use NVIDIA GPU' switch on under TrueNAS UI →"
+    echo "  Apps → Settings → Configure → check 'Use NVIDIA GPU' → Save"
+fi
