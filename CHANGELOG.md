@@ -2,6 +2,25 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## Uninstall replaces `docker.update` sledgehammer with explicit `app.stop`
+
+Hardware-test follow-up to #42. The previous teardown flow relied on `midclt call -j docker.update '{"nvidia": false}'` to "stop every container using the nvidia runtime", then drained, then destroyed MIG instances. In practice the toggle does NOT stop already-running containers — it only changes the docker runtime config so *future* container starts won't request a GPU. Containers with open CUDA/NVENC/NVDEC contexts keep running, keep holding their MIG slices, and `nvidia-smi mig -dci` fails with `In use by another client`.
+
+The drain check (`nvidia-smi --query-compute-apps=pid`) also missed this — it returns 0 when no **compute** kernels are active, but NVENC/NVDEC clients (frigate's ffmpeg, all transcoding/decode workloads) don't show there. Idle compute is not the same as no clients.
+
+Restructured the teardown into a six-step deterministic flow:
+
+1. **Pre-scan** every app via `app.query` → `app.config <name>`, cache `(name, slot, old MIG-* UUID, state)` for each app whose `nvidia_gpu_selection.<slot>.uuid` starts with `MIG-`.
+2. **Stop** each MIG-holding app explicitly with `midclt call -j app.stop <name>`. `-j` blocks on the container actually tearing down, which is the only reliable way to get NVENC/NVDEC clients off the GPU. Apps already non-RUNNING are skipped (no container to stop) but still get reassigned in step 5.
+3. **Drain** for up to 15 s on `nvidia-smi --query-compute-apps` — short window since `app.stop -j` already blocked on the heavy lifting.
+4. **Destroy + disable with retry** — wrap `mig -dci` / `mig -dgi` / `-mig 0` in a 3×3 s retry loop. Driver sometimes takes a few seconds to release a CUDA client after the container PID is reaped; the retry absorbs this.
+5. **Reassign** each cached app to the full-GPU UUID on the same PCI slot. Uses the cached `(slot, old_uuid)` so no second walk through `app.config` is needed.
+6. **Restart** any cached app that was RUNNING pre-stop.
+
+The `docker.update` toggle is gone from the MIG-only path. It's preserved (now with `-j`) for the `--with-driver` path, where we genuinely need every nvidia-runtime container down so the kernel module isn't held while the live `.raw` is swapped.
+
+Side-benefits of the new structure: the pre-scan cache means each app is read from middleware once instead of twice (was: once in the reassign loop, once implicitly via the docker toggle); the restart phase no longer disturbs apps that didn't use MIG; the failure message is more accurate ("non-app process must be holding a slice" instead of pointing the user back at app.stop, which the script already did).
+
 ## Uninstall reassign-loop hardening (silent abort + state-scope + docker job race)
 
 Hardware-test finding on the previous "rewrite per-app MIG-* UUIDs" change (#41): on a host with apps in mixed states, the script went silent right after `Reassigning apps that still point at MIG-* UUIDs...` and never reached sysext-unmerge, PREINIT-deregister, or persist-cleanup. Diagnostic showed `nvidia-mig.raw` symlink still in `/etc/extensions/`, PREINIT id still registered, `mig.conf` still on disk, and the target app's `nvidia_gpu_selection.<slot>.uuid` still pointing at a stale `MIG-*` value.
