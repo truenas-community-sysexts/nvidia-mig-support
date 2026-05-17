@@ -425,21 +425,21 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           cat > release-notes.md <<EOF
-          Unified release: both \`nvidia.raw\` (driver-only) and \`nvidia-mig.raw\` (MIG tooling) under one tag.
+          Enables Nvidia MIG support and container mapping for MIGs. Optionally use later Nvidia drivers than the stock TrueNAS version if needed for hardware compatibility.
 
           The install script picks the right asset based on the flag you pass:
 
           - \`install-mig-sysext.sh\` (default) → installs \`nvidia-mig.raw\` on top of TrueNAS's stock driver. No reboot.
-          - \`install-mig-sysext.sh --with-driver\` → installs \`nvidia.raw\` (driver swap, requires reboot) **and** \`nvidia-mig.raw\` (MIG tooling). Use when the stock TrueNAS driver doesn't meet your hardware's needs.
+          - \`install-mig-sysext.sh --with-driver\` → installs \`nvidia.raw\` and \`nvidia-mig.raw\` (driver swap, requires reboot).
 
-          - Driver:        \`${NVIDIA_VERSION}\` (${KERNEL_MODULE_TYPE} module)
-          - TrueNAS:       \`${TRUENAS_VERSION}\`
-          - Run number:    ${RUN_NUMBER}
+          - TrueNAS:          \`${TRUENAS_VERSION}\`
+          - Optional Driver:  \`${NVIDIA_VERSION}\` (${KERNEL_MODULE_TYPE} module)
+          - Run number:       ${RUN_NUMBER}
           - Source commit: \`${COMMIT_SHA}\`
 
-          Install: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash\`
+          MIG Only: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash\`
 
-          With custom driver: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash -s -- --with-driver\`
+          MIG+Driver: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash -s -- --with-driver\`
           EOF
 
       - name: Publish release
