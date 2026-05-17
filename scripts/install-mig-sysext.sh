@@ -182,6 +182,30 @@ if_real() {
     fi
 }
 
+# Detect the running TrueNAS version via midclt. Retries on transient
+# failures — observed: midclt sporadically returns nothing on the first
+# call after a `sudo` invocation, succeeds on retry within ~1s. The
+# pattern is reproducible enough that letting the script die on the
+# first miss is hostile UX. Echoes the version; returns 1 on persistent
+# failure.
+detect_truenas_version() {
+    local v i
+    for i in 1 2 3; do
+        v=$(midclt call system.info 2>/dev/null | python3 -c '
+import sys, json
+try:
+    print(json.load(sys.stdin)["version"])
+except Exception:
+    pass' 2>/dev/null) || true
+        if [ -n "$v" ]; then
+            printf '%s\n' "$v"
+            return 0
+        fi
+        [ "$i" -lt 3 ] && sleep 1
+    done
+    return 1
+}
+
 resolve_release_tag() {
     # Returns the release tag on stdout.
     # If --release=TAG was passed, echoes it verbatim.
@@ -193,16 +217,10 @@ resolve_release_tag() {
     fi
 
     local version
-    version=$(midclt call system.info 2>/dev/null | python3 -c '
-import sys, json
-try:
-    print(json.load(sys.stdin)["version"])
-except Exception:
-    pass' 2>/dev/null) || true
-    if [ -z "$version" ]; then
-        echo "ERROR: could not detect TrueNAS version (midclt call system.info failed)" >&2
+    version=$(detect_truenas_version) || {
+        echo "ERROR: could not detect TrueNAS version (midclt call system.info failed after 3 retries)" >&2
         exit 1
-    fi
+    }
     echo "Detected TrueNAS version: ${version}" >&2
 
     local prefix="v${version}${TAG_PREFIX_SUFFIX}"
@@ -908,8 +926,7 @@ if $WITH_DRIVER; then
         # what the release was tested against); fall back to live midclt.
         TARGET_TN_VER=$(parse_truenas_version_from_tag "$RESOLVED_TAG")
         if [ -z "$TARGET_TN_VER" ]; then
-            TARGET_TN_VER=$(midclt call system.info 2>/dev/null \
-                | python3 -c 'import sys,json; print(json.load(sys.stdin)["version"])' 2>/dev/null || true)
+            TARGET_TN_VER=$(detect_truenas_version || true)
             if [ -z "$TARGET_TN_VER" ]; then
                 echo "ERROR: cannot determine TrueNAS version for the build" >&2
                 exit 1
@@ -1008,8 +1025,16 @@ if_real cp "$MIG_SRC" "${PERSIST_DIR}/nvidia-mig.raw"
 $DRY_RUN || echo "Copied MIG sysext to ${PERSIST_DIR}/nvidia-mig.raw"
 
 if $WITH_DRIVER; then
-    if_real cp "$DRIVER_SRC" "${PERSIST_DIR}/nvidia.raw"
-    $DRY_RUN || echo "Copied driver sysext to ${PERSIST_DIR}/nvidia.raw"
+    # Cache-reuse branch (line ~920) sets DRIVER_SRC to ${PERSIST_DIR}/nvidia.raw
+    # directly, so `cp src dst` would be `cp X X` and cp errors out. Skip
+    # the copy when src and dst are already the same file. `-ef` handles
+    # symlinks, relative paths, and hard links correctly.
+    if [ "$DRIVER_SRC" -ef "${PERSIST_DIR}/nvidia.raw" ] 2>/dev/null; then
+        $DRY_RUN || echo "Driver sysext already at ${PERSIST_DIR}/nvidia.raw (cache-reuse); skipping copy"
+    else
+        if_real cp "$DRIVER_SRC" "${PERSIST_DIR}/nvidia.raw"
+        $DRY_RUN || echo "Copied driver sysext to ${PERSIST_DIR}/nvidia.raw"
+    fi
 
     # Stage nvidia-preinit-driver.sh BEFORE any /usr mutations so a failed
     # download fails fast instead of leaving the host half-installed.
