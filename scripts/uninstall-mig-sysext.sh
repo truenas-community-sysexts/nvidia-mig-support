@@ -272,6 +272,56 @@ except Exception:
             echo "        Re-run: 'sudo midclt call docker.update {\"nvidia\": true}' once uptime > 10 min."
         fi
 
+        # Reassign any app whose persisted nvidia_gpu_selection.<slot>.uuid
+        # still points at a MIG-* UUID. After this teardown those UUIDs no
+        # longer exist (we just destroyed the instances), so leaving the
+        # config alone means app.start fails with `[EFAULT] Failed 'up'
+        # action`. Rewrite to the full-GPU UUID on the same PCI slot so the
+        # app comes back up cleanly with whole-GPU access.
+        #
+        # Schema path was verified empirically (see CHANGELOG):
+        #   midclt call app.config <name>
+        #     → resources.gpus.nvidia_gpu_selection.<slot>.{use_gpu, uuid}
+        # `app.query` doesn't return this data — must use `app.config <name>`.
+        FULL_GPU_UUID_FOR_REASSIGN=$(/usr/bin/nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null \
+            | head -1 | tr -d '[:space:]' || true)
+        if [ -n "$ORIG_RUNNING" ] && [ -n "$FULL_GPU_UUID_FOR_REASSIGN" ]; then
+            echo ""
+            echo "  Reassigning apps that still point at MIG-* UUIDs..."
+            while IFS= read -r app; do
+                [ -z "$app" ] && continue
+                # Returns "slot|uuid" on the first MIG-* UUID found, empty otherwise.
+                mig_info=$(midclt call app.config "$app" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    gpus = (d.get('resources', {}) or {}).get('gpus', {}) or {}
+    sel = gpus.get('nvidia_gpu_selection', {}) or {}
+    for slot, cfg in sel.items():
+        if isinstance(cfg, dict):
+            uuid = cfg.get('uuid', '') or ''
+            if uuid.startswith('MIG-'):
+                print(f'{slot}|{uuid}')
+                break
+except Exception:
+    pass" 2>/dev/null)
+                if [ -n "$mig_info" ]; then
+                    slot="${mig_info%|*}"
+                    old_uuid="${mig_info#*|}"
+                    payload="{\"values\":{\"resources\":{\"gpus\":{\"use_all_gpus\":false,\"nvidia_gpu_selection\":{\"${slot}\":{\"use_gpu\":true,\"uuid\":\"${FULL_GPU_UUID_FOR_REASSIGN}\"}}}}}}"
+                    if run_capture_with_elapsed "    Reassigning $app (was ${old_uuid:0:20}...)" \
+                        midclt call -j app.update "$app" "$payload"; then
+                        echo "    Reassigning $app... OK (${ELAPSED}s, now full GPU)"
+                    else
+                        echo "    Reassigning $app... WARN (${ELAPSED}s): $CAPTURED_OUT"
+                    fi
+                fi
+            done <<<"$ORIG_RUNNING"
+        elif [ -z "$FULL_GPU_UUID_FOR_REASSIGN" ]; then
+            echo "  WARN: could not read full-GPU UUID from nvidia-smi — skipping app reassign"
+            echo "        Apps with persisted MIG-* UUIDs may fail to start; check 'sudo midclt call app.config <name>'"
+        fi
+
         # Restart anything that WAS running before we touched it. Some apps
         # may have come back automatically when nvidia=true was set; we
         # check current state first and only start if still not RUNNING,
@@ -499,12 +549,10 @@ MIG runtime teardown summary:
   - MIG mode disabled on the GPU (firmware state) ✓ verified
   - MIG instances destroyed
   - Apps' NVIDIA toggle stopped all GPU consumers; toggle re-enabled
+  - Apps that pointed at MIG-* UUIDs were reassigned to the full GPU
+    UUID on the same PCI slot
   - Apps that were RUNNING pre-teardown were restarted
   - mig.conf removed from the persist dir (unless --keep-persist was passed)
-
-NOTE: this script does NOT rewrite per-app GPU selection. Apps whose
-config previously pointed at a specific MIG-* UUID may need manual
-attention — see the TrueNAS UI Apps → app → Edit → GPU section.
 
 EOF
     else
