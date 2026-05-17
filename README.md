@@ -12,14 +12,12 @@ You also need to switch you card into compute mode (this will disable video outp
 
 Please see the instructions [here](docs/architecture.md#workstation-edition-one-time-setup)
 
-
 ```bash
 # On TrueNAS, as root:
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash
 sudo configure-mig
 ```
-
 
 If you need to replace the nvidia stock driver with the newest one from the latest release of this sysext, add `--with-driver`:
 
