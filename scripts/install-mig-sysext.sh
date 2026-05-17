@@ -170,9 +170,13 @@ fi
 # Run a command in real mode; print `[dry-run] would: …` in dry-run mode.
 # For redirections or compound shell logic, gate manually with
 # `if $DRY_RUN; then ... else ... fi`.
+#
+# The dry-run message goes to stderr so helpers whose stdout is captured
+# (e.g. `stage_dir=$(stage_build_helpers)`) don't end up with would-be
+# log lines bleeding into their return value.
 if_real() {
     if $DRY_RUN; then
-        printf '[dry-run] would: %s\n' "$*"
+        printf '[dry-run] would: %s\n' "$*" >&2
     else
         "$@"
     fi
