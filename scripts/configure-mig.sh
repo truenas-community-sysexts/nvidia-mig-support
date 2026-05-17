@@ -435,6 +435,16 @@ echo ""
 echo "Stopping GPU-bound apps to free the GPU..."
 echo "  Scanning apps for GPU assignments..."
 
+# Build the set of NVIDIA UUIDs that actually exist on the current
+# hardware — the parent GPU plus any MIG instances (if MIG is already
+# enabled from a previous run). App configs can contain stale UUIDs left
+# over from a previously-installed GPU (e.g. a 4090 swapped out for this
+# Blackwell). The TrueNAS UI filters those out of display; our filter
+# matches that behavior so we don't pre-stop an app whose GPU binding
+# isn't actually live.
+VALID_UUIDS=$(/usr/bin/nvidia-smi -L 2>/dev/null \
+    | sed -nE 's/.*\(UUID:[[:space:]]*((GPU|MIG)-[^)]+)\).*/\1/p' || true)
+
 # `|| true` on every middleware command substitution: `set -e` + pipefail
 # would otherwise abort the whole script if any single app's config read
 # fails (mid-deploy, crashed, transient middleware error).
@@ -448,23 +458,31 @@ try:
 except Exception:
     pass" 2>/dev/null || true)
 
-GPU_APPS_INFO=""  # name|state lines for apps with any nvidia_gpu_selection
+GPU_APPS_INFO=""  # name|state lines for apps bound to a *currently-valid* UUID
 if [ -n "$ALL_APPS" ]; then
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         app="${line%|*}"
         state="${line#*|}"
         config_json=$(midclt call app.config "$app" 2>/dev/null || true)
-        is_gpu=$(printf '%s' "$config_json" | python3 -c "
-import sys, json
+        is_gpu=$(printf '%s' "$config_json" | VALID_UUIDS="$VALID_UUIDS" python3 -c "
+import sys, json, os
+valid = set(os.environ.get('VALID_UUIDS', '').split())
 try:
     d = json.load(sys.stdin)
     gpus = (d.get('resources', {}) or {}).get('gpus', {}) or {}
     sel = gpus.get('nvidia_gpu_selection', {}) or {}
     for slot, cfg in sel.items():
-        if isinstance(cfg, dict) and cfg.get('uuid'):
-            print('y')
-            break
+        if isinstance(cfg, dict):
+            uuid = (cfg.get('uuid') or '').strip()
+            # Two gates: use_gpu must be explicitly true (the app is
+            # actively using the GPU, not just carrying a leftover slot
+            # entry with use_gpu=false), AND the uuid must reference a
+            # device that exists on the current hardware (filters out
+            # stale UUIDs from previously-installed GPUs).
+            if cfg.get('use_gpu') is True and uuid and uuid in valid:
+                print('y')
+                break
 except Exception:
     pass" 2>/dev/null || true)
         if [ "$is_gpu" = "y" ]; then
@@ -862,10 +880,26 @@ for i in "${!STAGED_APP[@]}"; do
     app="${STAGED_APP[$i]}"
     echo "  ${app} <-- device ${STAGED_DEV[$i]} (${STAGED_DTYPE[$i]})"
 
-    orig_state=$(midclt call app.get_instance "$app" 2>/dev/null \
-        | python3 -c "import sys,json
+    # Prefer the state we cached in the pre-MIG-create scan: by the time
+    # we get here, any app we pre-stopped reads as STOPPED via app.get_instance,
+    # which would make us "leave it stopped" even though it was RUNNING when
+    # the user invoked configure-mig. Fall back to a live query for apps
+    # that weren't in the pre-stop set (newly assigned this run).
+    orig_state=""
+    if [ -n "${GPU_APPS_INFO:-}" ]; then
+        while IFS='|' read -r capp cstate; do
+            if [ "$capp" = "$app" ]; then
+                orig_state="$cstate"
+                break
+            fi
+        done <<<"$GPU_APPS_INFO"
+    fi
+    if [ -z "$orig_state" ]; then
+        orig_state=$(midclt call app.get_instance "$app" 2>/dev/null \
+            | python3 -c "import sys,json
 try: print(json.load(sys.stdin).get('state',''))
 except: print('')" 2>/dev/null)
+    fi
     echo "    Original state: ${orig_state:-unknown}"
     was_running=false
     [ "$orig_state" = "RUNNING" ] && was_running=true
