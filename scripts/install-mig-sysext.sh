@@ -942,18 +942,18 @@ register_preinit "nvidia-mig-setup.service" \
 
 # NOTE on the Apps' NVIDIA toggle (docker.config.nvidia):
 #
-# Earlier revisions of this script attempted to re-enable the toggle here
-# (query → set → verify). We dropped that. Hardware testing showed:
+# We don't touch the docker.config.nvidia toggle here. The current state
+# is whatever the user (or the previous uninstall) left it at — typically
+# True on a system that's been using GPU apps. If it's False (e.g. left
+# that way by a prior uninstall that didn't restore it, or by the user
+# explicitly turning it off), configure-mig's precheck will set it to
+# True post-reboot before doing anything else.
 #
-#   1. Pre-reboot, the verify succeeds — but the toggle resets to OFF on
-#      the next boot regardless of what we set here.
-#   2. Post-reboot, the same docker.update call silently fails to persist
-#      for some time (typically ~10 min). We don't know why; it resolves
-#      on its own.
-#
-# So a pre-reboot attempt gives a false sense of completion. configure-mig
-# now waits for the toggle to start accepting writes before doing anything
-# else; the final banner below points users at that.
+# Hardware testing also showed that immediately after a fresh boot the
+# apps subsystem doesn't accept docker.update writes for some time — the
+# call returns success but the value doesn't persist. We don't know why;
+# resolves within ~10 min. configure-mig's precheck polls through that
+# window automatically.
 
 # ─────────────────────────────────────────────────────────────────────────
 # Done. Mode-appropriate finishing messages.
