@@ -6,7 +6,7 @@ If you don't know what Nvidia MIG is you then you don't need this sysext (MIGs a
 
 ## Getting Started 
 
-Default behaviour is to add mig suport to the existing shipped driver on 25.10 or later.
+Default behaviour is to add mig suport to the existing shipped driver on TrueNas 25.10 or later.
 
 You also need to switch you card into compute mode (this will disable video output if you are using the DP ports)
 
