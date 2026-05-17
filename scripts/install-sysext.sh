@@ -908,14 +908,14 @@ register_preinit "nvidia-mig-setup.service" \
     120
 
 # Attempt to re-enable Apps' NVIDIA toggle. We do query → set → verify
-# (rather than fire-and-forget) because at this point in the --with-driver
-# flow NVML is in driver/library mismatch (libs in /usr are the new
-# driver's, kernel modules in RAM are still the previous driver's). Recent
-# TrueNAS middleware validates docker.update against NVML and silently
-# rejects when probing fails, persisting nvidia=false. A blind call would
-# appear to succeed but actually leave the Apps toggle off after reboot.
-# Some TrueNAS versions DON'T validate, in which case the re-enable does
-# stick — so we try, then verify, and only warn if it didn't stick.
+# (rather than fire-and-forget) because empirically a blind docker.update
+# can silently fail to persist on some TrueNAS versions when run during
+# the post-swap pre-reboot window — the Apps toggle ends up off after
+# the user reboots. The exact mechanism (middleware-side validation,
+# transient middleware state, something else) isn't pinned down, so we
+# don't speculate in user-facing output. Verifying via re-query gives
+# us a reliable signal regardless of cause: if the set didn't stick,
+# we warn loudly with explicit post-reboot instructions.
 #
 # (Inlined helper rather than sourced; uninstall-nvidia-sysext.sh has the
 # same function — keep these copies in sync.)
@@ -961,7 +961,7 @@ except Exception:
         echo "  app services nvidia toggle re-enabled (verified)"
         return 0
     fi
-    echo "  could NOT re-enable right now (likely NVML mismatch from the just-applied driver swap); see post-reboot instructions below"
+    echo "  re-enable call did not persist (verified via re-query); see post-reboot instructions below"
     return 1
 }
 
@@ -1052,9 +1052,10 @@ EOF
 >>> AFTER REBOOT — one-time step to make Apps see the GPU again <<<
 
 App services were turned off during install (so we could swap the
-driver). Auto re-enable was attempted but did NOT stick — TrueNAS
-middleware likely validated the call against NVML, which is in
-"driver/library mismatch" right now, so it rejected.
+driver). Auto re-enable was attempted but the change did NOT persist
+(re-query verified). This is observable on some TrueNAS versions
+during the pre-reboot window; the manual step below works reliably
+once the box is back up.
 
 Once the box is back up and 'nvidia-smi' shows the new driver, run:
 

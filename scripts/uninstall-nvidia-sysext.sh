@@ -117,12 +117,12 @@ if ! $KEEP_PERSIST && [ -n "$PERSIST_DIR" ]; then
 fi
 
 # Attempt to re-enable Apps' NVIDIA toggle. Same query → set → verify
-# pattern as install-sysext.sh, for the same reason: NVML is in
-# driver/library mismatch right now (libs in /usr are stock, kernel
-# modules in RAM are still the custom driver we just removed), so
-# middleware may silently reject a blind docker.update. Try, then
-# verify; only print the explicit post-reboot instruction if the
-# re-enable didn't stick. Keep in sync with install-sysext.sh's copy.
+# pattern as install-sysext.sh: empirically a blind docker.update can
+# silently fail to persist during the post-swap pre-reboot window on
+# some TrueNAS versions, leaving the Apps toggle off after reboot.
+# The exact mechanism isn't pinned down so we don't speculate in
+# user-facing output. Verifying via re-query gives us a reliable
+# signal regardless of cause. Keep in sync with install-sysext.sh.
 NVIDIA_REENABLE_OK=false
 attempt_nvidia_reenable() {
     if ! command -v midclt >/dev/null 2>&1; then
@@ -161,7 +161,7 @@ except Exception:
         echo "  app services nvidia toggle re-enabled (verified)"
         return 0
     fi
-    echo "  could NOT re-enable right now (likely NVML mismatch from the just-applied driver swap); see post-reboot instructions below"
+    echo "  re-enable call did not persist (verified via re-query); see post-reboot instructions below"
     return 1
 }
 
@@ -184,9 +184,10 @@ if ! $NVIDIA_REENABLE_OK; then
     echo ">>> AFTER REBOOT — one-time step to make Apps see the GPU again <<<"
     echo ""
     echo "App services were turned off during uninstall (so we could swap"
-    echo "the driver). Auto re-enable was attempted but did NOT stick —"
-    echo "TrueNAS middleware likely validated the call against NVML,"
-    echo "which is in driver/library mismatch right now, so it rejected."
+    echo "the driver). Auto re-enable was attempted but the change did NOT"
+    echo "persist (re-query verified). This is observable on some TrueNAS"
+    echo "versions during the pre-reboot window; the manual step below"
+    echo "works reliably once the box is back up."
     echo ""
     echo "Once the box is back up and 'nvidia-smi' shows the stock driver, run:"
     echo ""

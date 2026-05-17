@@ -124,6 +124,63 @@ validate_mig_profiles() {
     $ok
 }
 
+# --- Live-elapsed wrappers for long-blocking commands ---
+# midclt's `app.stop` / `app.update` / `app.start` and `systemctl restart`
+# of the MIG service can each take 5–60 s; without a counter the screen
+# looks frozen. These wrappers spawn a background ticker that prints
+# "<label>... Ns" once a second, run the command, and clear the line on
+# return. `ELAPSED` (and `CAPTURED_OUT` for the _capture variant) is set
+# in the caller's scope so it can print a final "OK (Ns)" / "FAILED (Ns)"
+# line.
+ELAPSED=0
+CAPTURED_OUT=""
+
+run_with_elapsed() {
+    # Args: label (with own indent), then command...
+    # Command's stdout/stderr pass through. Sets ELAPSED.
+    local label="$1"; shift
+    local start ticker_pid rc
+    start=$(date +%s)
+    (
+        while sleep 1; do
+            printf "\r%s... %ds" "$label" "$(($(date +%s) - start))"
+        done
+    ) &
+    ticker_pid=$!
+    "$@"
+    rc=$?
+    kill "$ticker_pid" 2>/dev/null
+    wait "$ticker_pid" 2>/dev/null
+    ELAPSED=$(($(date +%s) - start))
+    # Clear the live line so the caller's print replaces it.
+    printf "\r%80s\r" ""
+    return $rc
+}
+
+run_with_elapsed_capture() {
+    # Like run_with_elapsed but captures combined stdout+stderr into
+    # CAPTURED_OUT (so the caller can echo error text on failure).
+    local label="$1"; shift
+    local start outfile ticker_pid rc
+    start=$(date +%s)
+    outfile=$(mktemp)
+    (
+        while sleep 1; do
+            printf "\r%s... %ds" "$label" "$(($(date +%s) - start))"
+        done
+    ) &
+    ticker_pid=$!
+    "$@" >"$outfile" 2>&1
+    rc=$?
+    kill "$ticker_pid" 2>/dev/null
+    wait "$ticker_pid" 2>/dev/null
+    ELAPSED=$(($(date +%s) - start))
+    CAPTURED_OUT=$(cat "$outfile")
+    rm -f "$outfile"
+    printf "\r%80s\r" ""
+    return $rc
+}
+
 profile_label() {
     # Engine counts straight from `nvidia-smi mig -lgip` on Blackwell.
     # "1 dec/enc/jpg" = 1 NVDEC + 1 NVENC + 1 NVJPG per instance.
@@ -360,7 +417,12 @@ done
 # a no-op and the old MIG instances remain. `restart` forces re-execution,
 # which re-reads mig.conf and applies the new profile list.
 echo "Restarting nvidia-mig-setup.service (re-running with new profiles)..."
-systemctl restart nvidia-mig-setup.service || { echo "ERROR: systemctl restart failed"; exit 1; }
+if run_with_elapsed "  elapsed" systemctl restart nvidia-mig-setup.service; then
+    echo "  done (${ELAPSED}s)"
+else
+    echo "ERROR: systemctl restart failed after ${ELAPSED}s"
+    exit 1
+fi
 systemctl status nvidia-mig-setup.service --no-pager -n 0 | head -3 || true
 
 # --- Re-enable app services ---
@@ -586,21 +648,19 @@ except: print('')" 2>/dev/null)
     [ "$orig_state" = "RUNNING" ] && was_running=true
 
     if $was_running; then
-        printf "    Stopping..."
-        if err=$(midclt call -j app.stop "$app" 2>&1); then
-            echo " OK"
+        if run_with_elapsed_capture "    Stopping" midclt call -j app.stop "$app"; then
+            echo "    Stopping... OK (${ELAPSED}s)"
         else
-            echo " WARN (continuing): $err"
+            echo "    Stopping... WARN (continuing, ${ELAPSED}s): $CAPTURED_OUT"
         fi
     fi
 
-    printf "    Applying GPU config..."
     payload="{\"values\":{\"resources\":{\"gpus\":{\"use_all_gpus\":false,\"nvidia_gpu_selection\":{\"$PCI_SLOT\":{\"use_gpu\":true,\"uuid\":\"${STAGED_UUID[$i]}\"}}}}}}"
-    if err=$(midclt call -j app.update "$app" "$payload" 2>&1); then
-        echo " OK"
+    if run_with_elapsed_capture "    Applying GPU config" midclt call -j app.update "$app" "$payload"; then
+        echo "    Applying GPU config... OK (${ELAPSED}s)"
     else
-        echo " FAILED:"
-        echo "$err" | sed 's/^/      /'
+        echo "    Applying GPU config... FAILED (${ELAPSED}s):"
+        echo "$CAPTURED_OUT" | sed 's/^/      /'
         # Restore the app to its original state on failure — only start it
         # back up if it was actually running before we touched it.
         if $was_running; then
@@ -610,11 +670,10 @@ except: print('')" 2>/dev/null)
     fi
 
     if $was_running; then
-        printf "    Starting..."
-        if err=$(midclt call -j app.start "$app" 2>&1); then
-            echo " OK"
+        if run_with_elapsed_capture "    Starting" midclt call -j app.start "$app"; then
+            echo "    Starting... OK (${ELAPSED}s)"
         else
-            echo " WARN: $err"
+            echo "    Starting... WARN (${ELAPSED}s): $CAPTURED_OUT"
         fi
     else
         echo "    Leaving stopped (was not running originally)"
