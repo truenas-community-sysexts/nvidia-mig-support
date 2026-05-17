@@ -358,11 +358,11 @@ Profile IDs (RTX PRO 6000 Blackwell, 96 GB total, 4 slices).
 GPU has 4 NVDEC, 4 NVENC, 4 NVJPG, 1 OFA total — distributed below.
 
 Suffix     Meaning
-(none)     compute + 1 of each media engine
+(none)     compute + NVDEC/NVENC/NVJPG (no OFA except on 4g)
 +gfx       adds OpenGL / Vulkan / DirectX support
-+me        compute + media engines including OFA (max 1 per GPU)
-+me.all    grabs all media engines exclusively (max 1, mutually exclusive)
--me        pure compute, no media engines
++me        adds OFA on top of base media engines (max 1 instance)
++me.all    grabs all NVDEC/NVENC/NVJPG/OFA for one instance (siblings must be -me)
+-me        pure compute (no NVDEC/NVENC/NVJPG/OFA)
 
   ID  Profile         DEC ENC JPG OFA GFX  Max
   14  1g.24gb          1   1   1   -   -    4
