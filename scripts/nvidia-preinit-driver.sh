@@ -156,10 +156,18 @@ else
     done
     if [ -n "$SYSEXT_KVER" ]; then
         log "ERROR: kernel-version mismatch — running ${RUNNING_KVER} but sysext bundles modules for ${SYSEXT_KVER}"
-        log "ERROR: TrueNAS was likely updated to a new kernel. Re-install a sysext matching ${RUNNING_KVER}:"
-        log "ERROR:   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install-mig-sysext.sh | sudo bash -s -- --with-driver"
-        log "ERROR:   (auto-detects the new TrueNAS version and picks a matching release)"
-        log "ERROR: Or browse: https://github.com/${REPO}/releases"
+        log "ERROR: TrueNAS was likely updated to a new kernel. Rebuild nvidia.raw against ${RUNNING_KVER}:"
+        log "ERROR:   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install-mig-sysext.sh | sudo bash -s -- --with-driver --rebuild"
+        log "ERROR:   (the one-liner detects the new TrueNAS version and rebuilds the driver sysext on this host)"
+        # Faster path if the build helpers are already staged from a prior install.
+        PERSIST_SCRIPTS=""
+        for d in /mnt/*/.config/nvidia-gpu/scripts; do
+            [ -x "${d}/build-on-host.sh" ] && PERSIST_SCRIPTS="$d" && break
+        done
+        if [ -n "$PERSIST_SCRIPTS" ]; then
+            log "ERROR: Or rebuild directly (skip the install-script round-trip):"
+            log "ERROR:   sudo ${PERSIST_SCRIPTS}/build-on-host.sh --help"
+        fi
     else
         log "WARNING: nvidia.ko not found anywhere under ${RUNNING_KO_DIR}/ and no other kernel-version directory has one either"
         log "WARNING: the sysext may not be merged, or the build is broken — check 'systemd-sysext status'"

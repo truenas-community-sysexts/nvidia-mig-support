@@ -30,6 +30,7 @@ jobs:
           shellcheck --severity=warning \
             scripts/build-nvidia-sysext.sh \
             scripts/build-mig-sysext.sh \
+            scripts/build-on-host.sh \
             scripts/install-mig-sysext.sh \
             scripts/uninstall-mig-sysext.sh \
             scripts/configure-mig.sh \

@@ -46,7 +46,7 @@ The other two are deferred:
 
 Tag format:
 
-- **`v<truenas>-nvidia<driver>-r<run>`** — produced by `build-sysext.yml`. Carries **both** `nvidia.raw` (driver-only) and `nvidia-mig.raw` (MIG tooling) as assets attached to a single release.
+- **`v<truenas>-nvidia<driver>-r<run>`** — produced by `build-sysext.yml`. Carries `nvidia-mig.raw` (MIG tooling) as the sole release asset, plus release notes pinning the recommended NVIDIA driver + TrueNAS combo for `--with-driver` to target. The CI driver build still runs as a smoke test (gates the release), but its `nvidia.raw` artifact is NOT published — the NVIDIA EULA prohibits us redistributing the proprietary userspace, so `--with-driver` builds it on the user's host instead. See [README License section](../README.md#license).
 
 The `-r<run>` suffix is `github.run_number` — monotonic per workflow, unique across retries on the same commit. So every workflow invocation gets a fresh, never-before-used tag, and `softprops/action-gh-release` can create the release cleanly without ever needing to delete or update an existing one.
 
@@ -55,7 +55,7 @@ The `make_latest` GitHub flag is what users pin to, not a tag name. Two sources 
 - **Manual `workflow_dispatch`** — defaults `mark_latest=true`. Promotes the new release to GitHub "Latest" immediately. The intent is: a human ran this, it's intentional, surface it as the new default.
 - **`workflow_call` from `check-releases.yml`** — passes `mark_latest=false`. Auto-builds get a release but don't displace the existing Latest until a hardware-test issue is resolved.
 
-How `install-mig-sysext.sh` finds the right release: detect local TrueNAS version via `midclt call system.info`, query `/repos/.../releases`, filter by `v<version>-nvidia` prefix, pick the most-recently-published. The release exposes both assets; the install script picks which one(s) to download based on whether `--with-driver` is passed. See `resolve_release_tag()` in [`scripts/install-mig-sysext.sh`](../scripts/install-mig-sysext.sh).
+How `install-mig-sysext.sh` finds the right release: detect local TrueNAS version via `midclt call system.info`, query `/repos/.../releases`, filter by `v<version>-nvidia` prefix, pick the most-recently-published. The release exposes `nvidia-mig.raw`, which the install script always downloads. With `--with-driver`, the script also parses the NVIDIA driver version out of the tag (`v25.10.3.1-nvidia595.58.03-r18` → `595.58.03`) and feeds it to `build-on-host.sh` for the on-host driver build. See `resolve_release_tag()` and `parse_nvidia_version_from_tag()` in [`scripts/install-mig-sysext.sh`](../scripts/install-mig-sysext.sh).
 
 Tag schema choices worth noting:
 
@@ -72,7 +72,7 @@ The build workflow is split into `resolve` (`ubuntu-latest`, lightweight), two p
 2. **Cheap visibility.** When `resolve` fails (e.g., malformed tracked-versions, missing input), CI fails in ~30 seconds without spinning up a build runner.
 3. **Cron-friendly.** The check-releases workflow uses `createWorkflowDispatch` to fire the build with explicit version inputs; `resolve` then computes the final tag and notes from those inputs without re-fetching anything.
 
-The two build jobs run in parallel because they share no inputs beyond the resolved parameters. If `build-nvidia` fails, `build-mig` still produces its artifact (and vice versa) — but the `publish` job depends on both, so a partial failure means no release is published. That's the right tradeoff: we never want a release that's missing one of the two assets that `install-mig-sysext.sh` expects.
+The two build jobs run in parallel because they share no inputs beyond the resolved parameters. If `build-nvidia` fails, `build-mig` still produces its artifact (and vice versa) — but the `publish` job depends on both, so a partial failure means no release is published. That's the right tradeoff even though only `nvidia-mig.raw` is published as a release asset: a green `build-nvidia` smoke test is the gate that says "the build script still works against current TrueNAS + NVIDIA upstream," and if it's red, users running `install-mig-sysext.sh --with-driver` against this release would hit the same failure on their host. Failing fast in CI is much friendlier than failing 8 minutes into the user's build.
 
 ## Auto-cadence: `check-releases.yml`
 
@@ -106,7 +106,7 @@ The two sysexts the build produces are deliberately scoped to non-overlapping re
 `nvidia.raw` is **driver-only by design**. Earlier iterations of this build had a `BUNDLE_MIG` knob that packed the MIG tooling into `nvidia.raw`, but that created two collision modes (both sysexts providing `configure-mig` and the service unit; install scripts needing to detect which one was the source of truth). The unified model is:
 
 - `install-mig-sysext.sh` (default) installs `nvidia-mig.raw` only. Stock driver carries on.
-- `install-mig-sysext.sh --with-driver` installs `nvidia.raw` **and** `nvidia-mig.raw`. The driver swap and the MIG install are two separate operations; they share a re-merge cycle but otherwise don't interact.
+- `install-mig-sysext.sh --with-driver` builds `nvidia.raw` on the user's TrueNAS host (via [`scripts/build-on-host.sh`](../scripts/build-on-host.sh) → `ubuntu:24.04` docker container → [`scripts/build-nvidia-sysext.sh`](../scripts/build-nvidia-sysext.sh)) and installs both. The driver swap and the MIG install are two separate operations; they share a re-merge cycle but otherwise don't interact.
 
 This means there is never a need to install both `nvidia-mig.raw` and a separately-bundled MIG copy — `nvidia.raw` never contains MIG. The same `nvidia-mig.raw` works on top of either the stock TrueNAS driver or a custom one.
 
