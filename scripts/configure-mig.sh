@@ -334,19 +334,25 @@ MIG_PROFILES="$MIG_PROFILES"
 EOF
 echo "Wrote $PERSIST_DIR/mig.conf"
 
-# --- Stop Docker so GPU is free ---
+# --- Stop app services so GPU is free ---
+# "App services" is the user-facing name for what TrueNAS calls Docker
+# internally; the middleware endpoint is still `docker.update`.
 echo ""
-echo "Stopping Docker to free the GPU..."
+echo "Stopping app services to free the GPU..."
 midclt call docker.update '{"nvidia": false}' >/dev/null \
-    || echo "WARN: docker.update returned an error (middleware may be flapping)"
+    || echo "WARN: app services API call (docker.update) returned an error — middleware may be flapping"
 
+printf "  Waiting for GPU to be released... 0s/120s"
 for attempt in $(seq 1 24); do
     N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
-    [ "${N:-0}" -eq 0 ] && { echo "GPU released"; break; }
+    if [ "${N:-0}" -eq 0 ]; then
+        printf "\r  GPU released                                            \n"
+        break
+    fi
     printf "\r  Waiting for %d GPU process(es)... %ds/120s" "$N" "$((attempt * 5))"
     sleep 5
 done
-echo ""
+[ "${attempt:-0}" -eq 24 ] && echo ""
 
 # --- Run nvidia-mig-setup.service (destroys + creates MIG instances) ---
 # Must use 'restart', not 'start'. The service is Type=oneshot with
@@ -357,27 +363,29 @@ echo "Restarting nvidia-mig-setup.service (re-running with new profiles)..."
 systemctl restart nvidia-mig-setup.service || { echo "ERROR: systemctl restart failed"; exit 1; }
 systemctl status nvidia-mig-setup.service --no-pager -n 0 | head -3 || true
 
-# --- Re-enable Docker ---
+# --- Re-enable app services ---
 echo ""
-echo "Re-enabling Docker..."
-midclt call docker.update '{"nvidia": true}' >/dev/null || echo "WARN: docker.update re-enable failed"
+echo "Re-enabling app services..."
+midclt call docker.update '{"nvidia": true}' >/dev/null \
+    || echo "WARN: app services API call (docker.update) re-enable failed"
 
 # --- Wait for apps to come back so we can list them ---
-echo "Waiting for app service to come back (60-90s)..."
+echo "Waiting for app services to come back (60-90s)..."
 APP_COUNT=0
+printf "  Waiting... 0s/90s"
 for attempt in $(seq 1 18); do
     APP_COUNT=$(midclt call app.query 2>/dev/null \
         | python3 -c "import sys,json
 try: print(len(json.load(sys.stdin)))
 except: print(0)" 2>/dev/null)
     if [ "${APP_COUNT:-0}" -gt 0 ]; then
-        echo "App service ready (${APP_COUNT} apps)"
+        printf "\r  App services ready (${APP_COUNT} apps)                  \n"
         break
     fi
     printf "\r  Waiting... %ds/90s" "$((attempt * 5))"
     sleep 5
 done
-echo ""
+[ "${attempt:-0}" -eq 18 ] && echo ""
 
 # --- Enumerate created MIG instances ---
 mapfile -t MIG_UUIDS < <(/usr/bin/nvidia-smi -L 2>/dev/null \

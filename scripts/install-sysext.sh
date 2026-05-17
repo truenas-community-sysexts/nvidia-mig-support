@@ -757,28 +757,40 @@ if $WITH_DRIVER; then
         fi
     fi
 
-    # Stop Docker so the GPU is free, wait for processes to drain.
+    # Stop app services (TrueNAS's containerized app runtime) so the GPU
+    # is free, then wait for any running compute processes to drain.
+    # User-facing strings say "app services"; the actual middleware API
+    # endpoint is still called `docker.update` (kept in code as the literal
+    # API name).
     echo ""
-    echo "Stopping Docker (releasing GPU)..."
+    echo "Stopping app services (releasing the GPU)..."
     if $DRY_RUN; then
         echo "[dry-run] would: midclt call docker.update '{\"nvidia\": false}'"
     else
         midclt call docker.update '{"nvidia": false}' >/dev/null \
-            || echo "WARN: docker.update failed (middleware may be transitionally down — continuing)"
+            || echo "WARN: app services API call (docker.update) failed — middleware may be transitionally down; continuing"
     fi
 
     if $DRY_RUN; then
         echo "[dry-run] would: wait up to 120s for running GPU processes to drain"
     elif [ -x /usr/bin/nvidia-smi ]; then
+        # Always print a first line so the user sees a counter even when
+        # the GPU is released within the first poll interval. Then either
+        # the carriage-return progress overwrites it, or "GPU released"
+        # supersedes it.
+        printf "  Waiting for GPU to be released... 0s/120s"
         for attempt in $(seq 1 24); do
             N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
             if [ "${N:-0}" -eq 0 ]; then
-                echo "GPU released"; break
+                printf "\r  GPU released                                            \n"
+                break
             fi
             printf "\r  Waiting for %d GPU process(es)... %ds/120s" "$N" "$((attempt * 5))"
             sleep 5
         done
-        echo ""
+        # Newline-after-progress guard in case we exited the loop on the
+        # max iteration without a "released" message.
+        [ "${attempt:-0}" -eq 24 ] && echo ""
     fi
 fi
 
@@ -897,12 +909,12 @@ register_preinit "nvidia-mig-setup.service" \
 
 if $WITH_DRIVER; then
     echo ""
-    echo "Re-enabling Docker..."
+    echo "Re-enabling app services..."
     if $DRY_RUN; then
         echo "[dry-run] would: midclt call docker.update '{\"nvidia\": true}'"
     else
         midclt call docker.update '{"nvidia": true}' >/dev/null \
-            || echo "WARN: docker.update re-enable failed"
+            || echo "WARN: app services API call (docker.update) re-enable failed"
     fi
 fi
 

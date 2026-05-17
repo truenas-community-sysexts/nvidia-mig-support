@@ -44,15 +44,26 @@ done
 
 echo "=== Uninstall full-driver nvidia.raw ==="
 
-# --- Stop Docker, drain GPU ---
-echo "Stopping Docker..."
-midclt call docker.update '{"nvidia": false}' >/dev/null || true
+# --- Stop app services, drain GPU ---
+# "App services" is the user-facing name for what TrueNAS calls Docker
+# internally; the middleware endpoint is still `docker.update`.
+echo "Stopping app services..."
+midclt call docker.update '{"nvidia": false}' >/dev/null \
+    || echo "WARN: app services API call (docker.update) failed — continuing"
 if [ -x /usr/bin/nvidia-smi ]; then
-    for _ in $(seq 1 24); do
+    # Match the install script's visible-counter pattern so users see
+    # progress instead of an opaque pause.
+    printf "  Waiting for GPU to be released... 0s/120s"
+    for attempt in $(seq 1 24); do
         N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
-        [ "${N:-0}" -eq 0 ] && break
+        if [ "${N:-0}" -eq 0 ]; then
+            printf "\r  GPU released                                            \n"
+            break
+        fi
+        printf "\r  Waiting for %d GPU process(es)... %ds/120s" "$N" "$((attempt * 5))"
         sleep 5
     done
+    [ "${attempt:-0}" -eq 24 ] && echo ""
 fi
 
 # --- Restore stock if we have a backup, else just leave whatever's there ---
@@ -105,9 +116,9 @@ if ! $KEEP_PERSIST && [ -n "$PERSIST_DIR" ]; then
     echo "  (nvidia-original.raw and nvidia-mig.raw kept — MIG sysext still works on stock driver)"
 fi
 
-# --- Re-enable Docker ---
+# --- Re-enable app services ---
 echo ""
-echo "Re-enabling Docker..."
+echo "Re-enabling app services..."
 midclt call docker.update '{"nvidia": true}' >/dev/null || true
 
 echo ""

@@ -30,31 +30,44 @@ log "Starting nvidia-mig-setup (boot: $(cat /proc/sys/kernel/random/boot_id 2>/d
 # info — `nvidia-smi -L` only succeeds when NVML can talk to the module.
 # 60s ceiling is empirically enough; if the driver isn't up by then,
 # nothing this script does will fix it.
+#
+# Progress logging: log start of wait + an elapsed-time update every 10s,
+# so `journalctl -u nvidia-mig-setup` shows clear timing instead of a
+# silent hang. Skipping per-iteration logs keeps the journal readable.
+NVIDIA_DRIVER_TIMEOUT=60
+NVIDIA_DRIVER_POLL_INTERVAL=2
 NVIDIA_READY=false
-for i in $(seq 1 30); do
+elapsed=0
+logged_initial=false
+while [ "$elapsed" -lt "$NVIDIA_DRIVER_TIMEOUT" ]; do
     if [ -x /usr/bin/nvidia-smi ] && /usr/bin/nvidia-smi -L >/dev/null 2>&1; then
         NVIDIA_READY=true
         break
     fi
-    if [ "$i" -eq 1 ]; then
+    if ! $logged_initial; then
         if [ -x /usr/bin/nvidia-smi ]; then
-            log "Waiting for NVIDIA driver to become responsive (kernel module may still be loading)..."
+            log "Waiting for NVIDIA driver to become responsive (kernel module may still be loading); timeout=${NVIDIA_DRIVER_TIMEOUT}s..."
         else
-            log "Waiting for /usr/bin/nvidia-smi (sysext may still be merging)..."
+            log "Waiting for /usr/bin/nvidia-smi (sysext may still be merging); timeout=${NVIDIA_DRIVER_TIMEOUT}s..."
         fi
+        logged_initial=true
+    elif [ "$((elapsed % 10))" -eq 0 ] && [ "$elapsed" -gt 0 ]; then
+        log "  still waiting for NVIDIA driver... ${elapsed}s/${NVIDIA_DRIVER_TIMEOUT}s"
     fi
-    sleep 2
+    sleep "$NVIDIA_DRIVER_POLL_INTERVAL"
+    elapsed=$((elapsed + NVIDIA_DRIVER_POLL_INTERVAL))
 done
 
 if ! $NVIDIA_READY; then
     if [ ! -x /usr/bin/nvidia-smi ]; then
-        log "/usr/bin/nvidia-smi not available after 60s, skipping MIG setup"
+        log "/usr/bin/nvidia-smi not available after ${NVIDIA_DRIVER_TIMEOUT}s, skipping MIG setup"
     else
-        log "/usr/bin/nvidia-smi present but driver did not become responsive after 60s, skipping MIG setup"
+        log "/usr/bin/nvidia-smi present but driver did not become responsive after ${NVIDIA_DRIVER_TIMEOUT}s, skipping MIG setup"
         log "(diagnostic: check 'journalctl -b -t nvidia-preinit-driver' if you used --with-driver, and 'dmesg | grep -i nvidia')"
     fi
     exit 0
 fi
+$logged_initial && log "NVIDIA driver responsive after ${elapsed}s"
 
 # --- Find config via glob (handles any pool name) ---
 CONFIG=""
@@ -126,14 +139,33 @@ COMPUTE_UUID="${ALL_MIG_UUIDS[0]}"
 log "First MIG UUID: $COMPUTE_UUID"
 
 # --- Update TrueNAS app GPU assignments ---
-# Wait for middleware to be ready (it may still be starting)
-for attempt in 1 2 3 4 5; do
+# Wait for middleware to be ready (it may still be starting at PREINIT time).
+# Time-based so the journal shows clear elapsed seconds rather than opaque
+# "attempt N/M" counters.
+MIDDLEWARE_TIMEOUT=25
+MIDDLEWARE_POLL_INTERVAL=5
+mid_elapsed=0
+mid_logged_initial=false
+mid_ready=false
+while [ "$mid_elapsed" -lt "$MIDDLEWARE_TIMEOUT" ]; do
     if midclt call system.ready 2>/dev/null | grep -q true; then
+        mid_ready=true
         break
     fi
-    log "Waiting for TrueNAS middleware (attempt $attempt/5)..."
-    sleep 5
+    if ! $mid_logged_initial; then
+        log "Waiting for TrueNAS middleware to be ready (system.ready); timeout=${MIDDLEWARE_TIMEOUT}s..."
+        mid_logged_initial=true
+    else
+        log "  still waiting for middleware... ${mid_elapsed}s/${MIDDLEWARE_TIMEOUT}s"
+    fi
+    sleep "$MIDDLEWARE_POLL_INTERVAL"
+    mid_elapsed=$((mid_elapsed + MIDDLEWARE_POLL_INTERVAL))
 done
+if $mid_ready && $mid_logged_initial; then
+    log "Middleware ready after ${mid_elapsed}s"
+elif ! $mid_ready; then
+    log "Middleware not ready after ${MIDDLEWARE_TIMEOUT}s; proceeding anyway (app remap may fail and is non-fatal)"
+fi
 
 # Get GPU PCI slot
 PCI_SLOT=$(midclt call app.gpu_choices 2>/dev/null \
