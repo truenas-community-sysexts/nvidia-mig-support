@@ -158,88 +158,55 @@ run_capture_with_elapsed() {
     return $rc
 }
 
-MIG_TEARDOWN_DONE=false
+MIG_TEARDOWN_ATTEMPTED=false
+MIG_TEARDOWN_OK=false
 if [ -x /usr/bin/nvidia-smi ] && command -v midclt >/dev/null 2>&1; then
     MIG_MODE_NOW=$(/usr/bin/nvidia-smi --query-gpu=mig.mode.current --format=csv,noheader 2>/dev/null \
         | head -1 | tr -d '[:space:]' || true)
     if [ "$MIG_MODE_NOW" = "Enabled" ]; then
+        MIG_TEARDOWN_ATTEMPTED=true
         echo ""
         echo "=== MIG runtime teardown (MIG mode currently Enabled) ==="
 
-        # Get full-GPU UUID + PCI slot.
-        FULL_GPU_UUID=$(/usr/bin/nvidia-smi --query-gpu=uuid --format=csv,noheader 2>/dev/null \
-            | head -1 | tr -d '[:space:]' || true)
-        PCI_SLOT=$(midclt call app.gpu_choices 2>/dev/null \
-            | python3 -c "
+        # Schema-independent approach: we can't reliably identify which
+        # apps hold the GPU by inspecting `config.resources.gpus.*`
+        # (empirically that path is empty even for apps whose container
+        # is actively using a MIG slice — the user's GPU selection may
+        # live in a different schema field, or be applied via runtime-
+        # only mechanisms). Instead, use TrueNAS's docker.update toggle
+        # as a sledgehammer: setting `nvidia: false` causes the docker
+        # service to stop every container using the nvidia runtime,
+        # regardless of how each app is configured. Then drain, destroy,
+        # disable, re-enable, and restart whatever was running before.
+        #
+        # We record state BEFORE we touch anything so the restart pass
+        # at the end re-establishes the prior set of running apps.
+
+        # Snapshot the names of every app currently RUNNING (no schema
+        # dependency on GPU fields).
+        ORIG_RUNNING=$(midclt call app.query 2>/dev/null | python3 -c "
 import sys, json
 try:
-    choices = json.load(sys.stdin)
-    for slot, info in choices.items():
-        if isinstance(info, dict):
-            vendor = (info.get('vendor') or '').upper()
-            desc = (info.get('description') or '').upper()
-            if 'NVIDIA' in vendor or 'NVIDIA' in desc:
-                print(slot, end=''); break
-        elif isinstance(info, str) and 'NVIDIA' in info.upper():
-            print(slot, end=''); break
+    for a in json.load(sys.stdin):
+        if a.get('state') == 'RUNNING':
+            print(a.get('name', ''))
 except Exception:
     pass" 2>/dev/null)
-
-        if [ -z "$FULL_GPU_UUID" ] || [ -z "$PCI_SLOT" ]; then
-            echo "  WARN: could not determine full-GPU UUID (${FULL_GPU_UUID:-?}) or PCI slot (${PCI_SLOT:-?})"
-            echo "        — skipping app reassignment; will still destroy MIG instances + disable mode"
+        if [ -n "$ORIG_RUNNING" ]; then
+            echo "  Apps currently RUNNING (will be restarted after teardown):"
+            while IFS= read -r app; do
+                [ -n "$app" ] && echo "    $app"
+            done <<<"$ORIG_RUNNING"
         else
-            echo "  Full-GPU UUID: $FULL_GPU_UUID"
-            echo "  PCI slot:      $PCI_SLOT"
+            echo "  No apps are currently running"
         fi
 
-        # Find apps with MIG-* UUIDs in nvidia_gpu_selection. One line per
-        # match: <name>|<state>|<slot>|<mig_uuid>
-        MIG_APPS=$(midclt call app.query 2>/dev/null | python3 -c "
-import sys, json
-try:
-    apps = json.load(sys.stdin)
-    for a in apps:
-        name = a.get('name', '')
-        state = a.get('state', '')
-        config = a.get('config', {}) or {}
-        resources = config.get('resources', {}) or {}
-        gpus = resources.get('gpus', {}) or {}
-        sel = gpus.get('nvidia_gpu_selection', {}) or {}
-        for slot, cfg in sel.items():
-            if isinstance(cfg, dict):
-                uuid = cfg.get('uuid', '') or ''
-                if uuid.startswith('MIG-'):
-                    print(f'{name}|{state}|{slot}|{uuid}')
-                    break
-except Exception:
-    pass" 2>/dev/null)
-
-        if [ -n "$MIG_APPS" ]; then
-            echo ""
-            echo "Apps currently pointing at MIG slices:"
-            printf '%s\n' "$MIG_APPS" | while IFS='|' read -r name state slot mig_uuid; do
-                echo "  $name  ($state)  --  $mig_uuid"
-            done
-
-            # Stop running MIG-using apps so we can free the GPU.
-            echo ""
-            while IFS='|' read -r name state _slot _mig_uuid; do
-                [ -z "$name" ] && continue
-                if [ "$state" = "RUNNING" ]; then
-                    if run_capture_with_elapsed "  Stopping $name" \
-                        midclt call -j app.stop "$name"; then
-                        echo "  Stopping $name... OK (${ELAPSED}s)"
-                    else
-                        echo "  Stopping $name... WARN (${ELAPSED}s): $CAPTURED_OUT"
-                    fi
-                else
-                    echo "  $name was already $state — not stopping"
-                fi
-            done <<<"$MIG_APPS"
-        else
-            echo "  No apps reference a MIG-* UUID in their GPU selection"
-        fi
+        # Sledgehammer-stop: nvidia=false stops every container that uses
+        # the nvidia runtime, no per-app config inspection needed.
+        echo ""
+        echo "  Disabling Apps' NVIDIA toggle to drain all GPU consumers..."
+        midclt call docker.update '{"nvidia": false}' >/dev/null 2>&1 \
+            || echo "  WARN: docker.update '{\"nvidia\": false}' returned an error — continuing"
 
         # Drain GPU compute processes before destroying MIG instances.
         echo ""
@@ -255,9 +222,7 @@ except Exception:
         done
         [ "${attempt:-0}" -eq 24 ] && echo ""
 
-        # Destroy compute + GPU instances, then disable MIG mode. All three
-        # are best-effort: "No GPU instances found" etc. when already-clean
-        # is not an error.
+        # Destroy compute + GPU instances, then disable MIG mode.
         echo "  Destroying MIG compute instances..."
         /usr/bin/nvidia-smi mig -dci 2>&1 | sed 's/^/    /' || true
         echo "  Destroying MIG GPU instances..."
@@ -265,37 +230,75 @@ except Exception:
         echo "  Disabling MIG mode..."
         /usr/bin/nvidia-smi -mig 0 2>&1 | sed 's/^/    /' || true
 
-        # Reassign affected apps' GPU config to the full-GPU UUID, then
-        # restart anything that was running. Skip if we couldn't resolve
-        # the UUID/slot above — but still try to restart so we don't leave
-        # apps stopped that we stopped.
-        if [ -n "$MIG_APPS" ]; then
-            echo ""
-            echo "Reassigning affected apps to the full GPU..."
-            while IFS='|' read -r name state slot _mig_uuid; do
-                [ -z "$name" ] && continue
-                if [ -n "$FULL_GPU_UUID" ] && [ -n "$slot" ]; then
-                    payload="{\"values\":{\"resources\":{\"gpus\":{\"use_all_gpus\":false,\"nvidia_gpu_selection\":{\"${slot}\":{\"use_gpu\":true,\"uuid\":\"${FULL_GPU_UUID}\"}}}}}}"
-                    if run_capture_with_elapsed "  Updating $name" \
-                        midclt call -j app.update "$name" "$payload"; then
-                        echo "  Updating $name... OK (${ELAPSED}s)"
-                    else
-                        echo "  Updating $name... FAILED (${ELAPSED}s): $CAPTURED_OUT"
-                    fi
-                fi
-                if [ "$state" = "RUNNING" ]; then
-                    if run_capture_with_elapsed "  Starting $name" \
-                        midclt call -j app.start "$name"; then
-                        echo "  Starting $name... OK (${ELAPSED}s)"
-                    else
-                        echo "  Starting $name... WARN (${ELAPSED}s): $CAPTURED_OUT"
-                    fi
-                fi
-            done <<<"$MIG_APPS"
+        # Verify the destroy + disable actually took. Most common failure
+        # is "In use by another client" — leftover processes holding a
+        # MIG slice we didn't drain. Be honest about it.
+        sleep 1
+        MIG_MODE_AFTER=$(/usr/bin/nvidia-smi --query-gpu=mig.mode.current --format=csv,noheader 2>/dev/null \
+            | head -1 | tr -d '[:space:]' || true)
+        if [ "$MIG_MODE_AFTER" = "Disabled" ]; then
+            MIG_TEARDOWN_OK=true
+            echo "  Verified: MIG mode now Disabled"
+        else
+            echo "  WARN: MIG mode is still '${MIG_MODE_AFTER:-unknown}' after teardown attempt."
+            echo "        Something is still holding a MIG slice. Inspect 'nvidia-smi'"
+            echo "        Processes section; identify the PID's container with"
+            echo "        'sudo midclt call app.query | grep -B1 <pid>' or 'docker ps'."
+            echo "        Then: 'sudo midclt call -j app.stop <name>' and re-run uninstall."
         fi
 
-        MIG_TEARDOWN_DONE=true
-        echo "=== MIG runtime teardown complete ==="
+        # Re-enable docker.nvidia so apps can come back. If uptime is < 10
+        # min this may be silently rejected by middleware (the boot-window
+        # — see install-mig-sysext.sh's long comment), but in the typical
+        # uninstall scenario uptime is well past that. The verify below
+        # surfaces if it didn't stick.
+        echo ""
+        echo "  Re-enabling Apps' NVIDIA toggle..."
+        midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 \
+            || echo "  WARN: docker.update '{\"nvidia\": true}' returned an error"
+        NVIDIA_TOGGLE_AFTER=$(midclt call docker.config 2>/dev/null \
+            | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print('true' if d.get('nvidia') else 'false')
+except Exception:
+    pass" 2>/dev/null)
+        if [ "$NVIDIA_TOGGLE_AFTER" = "true" ]; then
+            echo "  Verified: docker.config.nvidia=true"
+        else
+            echo "  WARN: docker.config.nvidia is still '${NVIDIA_TOGGLE_AFTER:-unknown}'."
+            echo "        Probably the boot-window (re-enable rejected for ~10 min after boot)."
+            echo "        Re-run: 'sudo midclt call docker.update {\"nvidia\": true}' once uptime > 10 min."
+        fi
+
+        # Restart anything that WAS running before we touched it. Some apps
+        # may have come back automatically when nvidia=true was set; we
+        # check current state first and only start if still not RUNNING,
+        # which makes this idempotent.
+        if [ -n "$ORIG_RUNNING" ]; then
+            echo ""
+            echo "  Restarting apps that were RUNNING pre-teardown..."
+            while IFS= read -r app; do
+                [ -z "$app" ] && continue
+                cur_state=$(midclt call app.get_instance "$app" 2>/dev/null \
+                    | python3 -c "import sys,json
+try: print(json.load(sys.stdin).get('state',''))
+except: print('')" 2>/dev/null)
+                if [ "$cur_state" = "RUNNING" ]; then
+                    echo "    $app: already RUNNING — no-op"
+                else
+                    if run_capture_with_elapsed "    Starting $app" \
+                        midclt call -j app.start "$app"; then
+                        echo "    Starting $app... OK (${ELAPSED}s)"
+                    else
+                        echo "    Starting $app... WARN (${ELAPSED}s): $CAPTURED_OUT"
+                    fi
+                fi
+            done <<<"$ORIG_RUNNING"
+        fi
+
+        echo "=== MIG runtime teardown finished ==="
         echo ""
     fi
 fi
@@ -488,15 +491,41 @@ running modules already match the userspace libs.
 EOF
 fi
 
-if $MIG_TEARDOWN_DONE; then
-    cat <<EOF
+if $MIG_TEARDOWN_ATTEMPTED; then
+    if $MIG_TEARDOWN_OK; then
+        cat <<EOF
 
 MIG runtime teardown summary:
-  - MIG mode disabled on the GPU (firmware state)
+  - MIG mode disabled on the GPU (firmware state) ✓ verified
   - MIG instances destroyed
-  - Apps that pointed at MIG-* UUIDs were reassigned to the full GPU
-    on the same PCI slot; running ones were restarted with the new config
+  - Apps' NVIDIA toggle stopped all GPU consumers; toggle re-enabled
+  - Apps that were RUNNING pre-teardown were restarted
   - mig.conf removed from the persist dir (unless --keep-persist was passed)
 
+NOTE: this script does NOT rewrite per-app GPU selection. Apps whose
+config previously pointed at a specific MIG-* UUID may need manual
+attention — see the TrueNAS UI Apps → app → Edit → GPU section.
+
 EOF
+    else
+        cat <<EOF
+
+WARNING: MIG runtime teardown did NOT fully succeed.
+
+  - MIG mode is still Enabled on the GPU (a process must still be
+    holding a MIG slice).
+  - Inspect: nvidia-smi   (Processes block shows the surviving PIDs)
+  - Identify the container: docker ps | grep <pid>  (or use ps -ef)
+  - Stop the holding app: sudo midclt call -j app.stop <name>
+  - Then manually finish the teardown:
+      sudo nvidia-smi mig -dci
+      sudo nvidia-smi mig -dgi
+      sudo nvidia-smi -mig 0
+  - Verify: sudo nvidia-smi --query-gpu=mig.mode.current --format=csv,noheader
+            (expect: Disabled)
+  - Re-enable apps' NVIDIA toggle (if uptime > 10 min):
+      sudo midclt call docker.update '{"nvidia": true}'
+
+EOF
+    fi
 fi
