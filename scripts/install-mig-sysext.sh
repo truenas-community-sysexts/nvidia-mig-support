@@ -182,6 +182,35 @@ if_real() {
     fi
 }
 
+# Live-elapsed wrapper for blocking midclt -j calls. Same pattern used in
+# configure-mig.sh and uninstall-mig-sysext.sh — spawns a background
+# ticker that prints "<label>... Ns" once a second, runs the command
+# with combined stdout/stderr captured, clears the line on return. Sets
+# ELAPSED and CAPTURED_OUT in caller scope.
+ELAPSED=0
+CAPTURED_OUT=""
+run_with_elapsed_capture() {
+    local label="$1"; shift
+    local start outfile ticker_pid rc
+    start=$(date +%s)
+    outfile=$(mktemp)
+    (
+        while sleep 1; do
+            printf "\r%s... %ds" "$label" "$(($(date +%s) - start))"
+        done
+    ) &
+    ticker_pid=$!
+    "$@" >"$outfile" 2>&1
+    rc=$?
+    kill "$ticker_pid" 2>/dev/null
+    wait "$ticker_pid" 2>/dev/null
+    ELAPSED=$(($(date +%s) - start))
+    CAPTURED_OUT=$(cat "$outfile")
+    rm -f "$outfile"
+    printf "\r%80s\r" ""
+    return $rc
+}
+
 # Detect the running TrueNAS version via midclt. Retries on transient
 # failures — observed: midclt sporadically returns nothing on the first
 # call after a `sudo` invocation, succeeds on retry within ~1s. The
@@ -1075,40 +1104,136 @@ if $WITH_DRIVER; then
         fi
     fi
 
-    # Stop app services (TrueNAS's containerized app runtime) so the GPU
-    # is free, then wait for any running compute processes to drain.
-    # User-facing strings say "app services"; the actual middleware API
-    # endpoint is still called `docker.update` (kept in code as the literal
-    # API name).
+    # Free the GPU so we can swap nvidia.raw safely. The docker.update
+    # '{"nvidia": false}' toggle alone is NOT enough — it only reconfigures
+    # the docker runtime for future container starts, leaving running
+    # containers (Frigate's ffmpeg NVENC, Ollama CUDA, etc.) attached. They
+    # hold the kernel module past the wait window and the swap proceeds
+    # with stale handles still in memory. The reboot afterward usually
+    # masks this, but only by accident.
+    #
+    # Mirrors configure-mig.sh's per-app stop (PR #48). Three steps:
+    #   1. Identify apps with a *currently-valid* GPU UUID assignment
+    #      (use_gpu=true AND uuid matches a device on the current GPU).
+    #   2. app.stop -j each one — blocks on actual container teardown.
+    #   3. docker.update toggle as belt-and-suspenders for any nvidia
+    #      runtime container outside the per-app scan.
+    # Drain check after that should be near-instant; on timeout we warn
+    # and continue (reboot resolves any latent issue — install's required-
+    # reboot semantics let us be lenient where configure-mig must abort).
     echo ""
-    echo "Stopping app services (releasing the GPU)..."
-    if $DRY_RUN; then
-        echo "[dry-run] would: midclt call docker.update '{\"nvidia\": false}'"
-    else
-        midclt call docker.update '{"nvidia": false}' >/dev/null \
-            || echo "WARN: app services API call (docker.update) failed — middleware may be transitionally down; continuing"
-    fi
+    echo "Stopping GPU-bound apps to free the GPU..."
 
     if $DRY_RUN; then
-        echo "[dry-run] would: wait up to 120s for running GPU processes to drain"
+        echo "[dry-run] would: scan app.query for apps with use_gpu=true + a valid GPU UUID"
+        echo "[dry-run] would: app.stop -j each match, then docker.update '{\"nvidia\": false}'"
+        echo "[dry-run] would: wait up to 30s for GPU compute clients to release"
     elif [ -x /usr/bin/nvidia-smi ]; then
-        # Always print a first line so the user sees a counter even when
-        # the GPU is released within the first poll interval. Then either
-        # the carriage-return progress overwrites it, or "GPU released"
-        # supersedes it.
-        printf "  Waiting for GPU to be released... 0s/120s"
-        for attempt in $(seq 1 24); do
+        VALID_UUIDS=$(/usr/bin/nvidia-smi -L 2>/dev/null \
+            | sed -nE 's/.*\(UUID:[[:space:]]*((GPU|MIG)-[^)]+)\).*/\1/p' || true)
+
+        # `|| true` on every middleware command substitution — `set -e` +
+        # pipefail would abort the whole install if any single app's
+        # config read fails (mid-deploy, crashed, transient middleware
+        # error). Pattern carried over from uninstall + configure-mig.
+        ALL_APPS=$(midclt call app.query 2>/dev/null | python3 -c "
+import sys, json
+try:
+    for a in json.load(sys.stdin):
+        n = a.get('name', '')
+        s = a.get('state', '')
+        if n: print(f'{n}|{s}')
+except Exception:
+    pass" 2>/dev/null || true)
+
+        GPU_APPS_INFO=""
+        if [ -n "$ALL_APPS" ]; then
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                app="${line%|*}"
+                state="${line#*|}"
+                config_json=$(midclt call app.config "$app" 2>/dev/null || true)
+                is_gpu=$(printf '%s' "$config_json" | VALID_UUIDS="$VALID_UUIDS" python3 -c "
+import sys, json, os
+valid = set(os.environ.get('VALID_UUIDS', '').split())
+try:
+    d = json.load(sys.stdin)
+    gpus = (d.get('resources', {}) or {}).get('gpus', {}) or {}
+    sel = gpus.get('nvidia_gpu_selection', {}) or {}
+    for slot, cfg in sel.items():
+        if isinstance(cfg, dict):
+            uuid = (cfg.get('uuid') or '').strip()
+            # Two gates (same as configure-mig): use_gpu must be
+            # explicitly true, AND uuid must reference a device on
+            # the current hardware (filters stale GPU-swap UUIDs).
+            if cfg.get('use_gpu') is True and uuid and uuid in valid:
+                print('y')
+                break
+except Exception:
+    pass" 2>/dev/null || true)
+                if [ "$is_gpu" = "y" ]; then
+                    GPU_APPS_INFO+="$app|$state"$'\n'
+                fi
+            done <<<"$ALL_APPS"
+        fi
+
+        if [ -z "$GPU_APPS_INFO" ]; then
+            echo "  No GPU-bound apps found"
+        else
+            echo "  GPU-bound apps (will be stopped):"
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                IFS='|' read -r gapp gstate <<<"$line"
+                echo "    $gapp (state=$gstate)"
+            done <<<"$GPU_APPS_INFO"
+
+            echo ""
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                IFS='|' read -r app state <<<"$line"
+                if [ "$state" != "RUNNING" ]; then
+                    echo "  $app: state=$state — no container to stop"
+                    continue
+                fi
+                if run_with_elapsed_capture "  Stopping $app" \
+                    midclt call -j app.stop "$app"; then
+                    echo "  Stopping $app... OK (${ELAPSED}s)"
+                else
+                    echo "  Stopping $app... WARN (${ELAPSED}s): $CAPTURED_OUT"
+                fi
+            done <<<"$GPU_APPS_INFO"
+        fi
+
+        echo ""
+        echo "  Disabling nvidia toolkit for docker (belt-and-suspenders)..."
+        midclt call docker.update '{"nvidia": false}' >/dev/null \
+            || echo "  WARN: docker.update returned an error — middleware may be flapping"
+
+        # Short drain — per-app stop already blocked on container teardown,
+        # so this only catches the brief window before the driver releases
+        # CUDA contexts. 30s is plenty when step 2 actually worked.
+        printf "  Waiting for GPU compute clients to release... 0s/30s"
+        for attempt in $(seq 1 10); do
             N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
             if [ "${N:-0}" -eq 0 ]; then
-                printf "\r  GPU released                                            \n"
+                printf "\r  GPU compute clients released                              \n"
                 break
             fi
-            printf "\r  Waiting for %d GPU process(es)... %ds/120s" "$N" "$((attempt * 5))"
-            sleep 5
+            printf "\r  Waiting for %d GPU process(es)... %ds/30s" "$N" "$((attempt * 3))"
+            sleep 3
         done
-        # Newline-after-progress guard in case we exited the loop on the
-        # max iteration without a "released" message.
-        [ "${attempt:-0}" -eq 24 ] && echo ""
+        if [ "${N:-0}" -gt 0 ]; then
+            echo ""
+            echo "  WARN: $N GPU process(es) still attached after 30s — continuing anyway."
+            echo "        Likely a non-app holder (bare CUDA, manual nvidia-smi, jail/VM passthrough)."
+            echo "        --with-driver requires a reboot regardless, which will clear any stale state."
+        fi
+    else
+        # No nvidia-smi (shouldn't happen on a --with-driver install with
+        # stock driver present, but be defensive). Fall back to toggle only.
+        echo "  nvidia-smi missing; toggling docker.nvidia=false only (no drain check)"
+        midclt call docker.update '{"nvidia": false}' >/dev/null \
+            || echo "  WARN: docker.update returned an error"
     fi
 fi
 
