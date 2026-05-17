@@ -294,10 +294,15 @@ read_raw_driver_version() {
 
 # Read the kernel version a sysext .raw was built for (single subdir of
 # usr/lib/modules/).
+#
+# `unsquashfs -l` prints rooted paths like `squashfs-root/usr/lib/modules/<kver>`
+# with no separator before `usr/`, so the regex anchors on the substring
+# (an earlier `.* usr/lib/modules/` form silently never matched and made
+# cache_valid_for_target always miss, forcing a rebuild on every re-install).
 read_raw_kernel_version() {
     [ -f "$1" ] || return 0
     unsquashfs -l "$1" 2>/dev/null \
-        | sed -nE 's|.* usr/lib/modules/([^/[:space:]]+)$|\1|p' \
+        | sed -nE 's|.*usr/lib/modules/([^/[:space:]]+)$|\1|p' \
         | sort -u | head -1
 }
 
@@ -373,7 +378,12 @@ build_driver_sysext_on_host() {
         return 0
     fi
 
-    "${stage_dir}/build-on-host.sh" "${args[@]}" \
+    # Redirect to stderr: build-on-host.sh's info/banner lines and the
+    # docker run's container stdout all use fd 1. This function returns
+    # the built path via stdout for $(…) capture by callers, so the build
+    # log would otherwise be appended to the captured path and break the
+    # downstream `[ -f "$DRIVER_SRC" ]` check.
+    "${stage_dir}/build-on-host.sh" "${args[@]}" >&2 \
         || { echo "ERROR: build-on-host.sh failed" >&2; return 1; }
     [ -f "$built_raw" ] \
         || { echo "ERROR: build-on-host claimed success but $built_raw is missing" >&2; return 1; }
