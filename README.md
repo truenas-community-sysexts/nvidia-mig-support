@@ -174,10 +174,10 @@ All scripts support `--help` for the full flag list. The install script bundles 
 
 | Script | Run when | What it does |
 | --- | --- | --- |
-| [`install-mig-sysext.sh`](scripts/install-mig-sysext.sh) | Setting up MIG on a host | Default: downloads `nvidia-mig.raw`, deploys it next to the stock sysext, registers a PREINIT entry. No reboot. `--with-driver`: also downloads `nvidia.raw`, swaps the stock driver (requires `/usr` r/w briefly), registers a second PREINIT entry. **Reboot required.** |
+| `install-mig-sysext.sh` | Setting up MIG on a host | Default: downloads `nvidia-mig.raw`, deploys it next to the stock sysext, registers a PREINIT entry. No reboot. `--with-driver`: also downloads `nvidia.raw`, swaps the stock driver (requires `/usr` r/w briefly), registers a second PREINIT entry. **Reboot required.** |
 | `configure-mig` installed with solution| After install, and any time you want to change the MIG layout | Validates your MIG profile string, writes `mig.conf`, restarts the MIG service, then walks you through assigning each MIG device to a TrueNAS app. |
 | `uninstall-nvidia-mig` installed with solution; source: [`uninstall-mig-sysext.sh`](scripts/uninstall-mig-sysext.sh))* | Removing anything this repo installed | Auto-detects state. MIG-only → removes the symlink, re-merges sysext, deregisters MIG PREINIT, no reboot. MIG + custom driver → also restores stock `nvidia.raw`, deregisters the driver PREINIT, **reboot required**. |
-| [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Before `install-mig-sysext.sh --with-driver` if you don't already have a stock backup | Pulls the stock `nvidia.raw` out of the official TrueNAS `.update` archive and stores it as `nvidia-original.raw` for later restore. |
+| `recover-stock-nvidia.sh` | Before `install-mig-sysext.sh --with-driver` if you don't already have a stock backup | Pulls the stock `nvidia.raw` out of the official TrueNAS `.update` archive and stores it as `nvidia-original.raw` for later restore. |
 
 
 
