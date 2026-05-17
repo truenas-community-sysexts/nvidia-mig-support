@@ -344,6 +344,57 @@ fi
 
 [ -x /usr/bin/nvidia-mig-setup ] || { echo "ERROR: /usr/bin/nvidia-mig-setup missing — run install-{mig,nvidia}-sysext.sh first." >&2; exit 1; }
 
+# --- Wait for the TrueNAS app service to stabilize ---
+#
+# Empirically, on a freshly-booted TrueNAS host the apps subsystem won't
+# accept the `docker.update '{"nvidia": true}'` toggle for some time after
+# boot — the call returns success but the new value isn't persisted, and a
+# follow-up `docker.config` still reads `nvidia: False`. We don't know
+# what causes this; we just know it resolves on its own within ~10 min and
+# that running configure-mig before it resolves leaves the GPU toggle
+# stuck OFF after the script's apps-re-enable step at the end.
+#
+# Probe by trying to set the toggle to true and reading it back. Once a
+# write sticks, the subsystem is ready. nvidia=true is the post-configure-mig
+# target state anyway, so leaving it set here is fine.
+echo ""
+echo "Waiting for TrueNAS app service to stabilize (nvidia toggle accepts writes)..."
+APP_SERVICE_READY=false
+for attempt in $(seq 1 60); do   # 60 × 10s = 10 min
+    midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+    sleep 2
+    state=$(midclt call docker.config 2>/dev/null | python3 -c "
+import sys, json
+try: print(json.load(sys.stdin).get('nvidia'))
+except Exception: print('')" 2>/dev/null || true)
+    if [ "$state" = "True" ]; then
+        APP_SERVICE_READY=true
+        printf "\r  App service ready (nvidia toggle accepted)                          \n"
+        break
+    fi
+    printf "\r  Waiting... %ds/600s (current docker.config nvidia=%s)" "$((attempt * 10))" "${state:-?}"
+    sleep 8
+done
+
+if ! $APP_SERVICE_READY; then
+    echo ""
+    echo "ERROR: TrueNAS app service did not accept the nvidia toggle within 10 min." >&2
+    echo "       Symptom: 'midclt call docker.update {\"nvidia\": true}' returns success" >&2
+    echo "       but a follow-up 'midclt call docker.config' still reports nvidia=False." >&2
+    echo "" >&2
+    echo "       Suggested actions:" >&2
+    echo "         1. Wait another few minutes and re-run configure-mig — the subsystem" >&2
+    echo "            sometimes takes longer than 10 min to settle after a reboot." >&2
+    echo "         2. Check that middleware is healthy:" >&2
+    echo "              sudo midclt call system.info | head" >&2
+    echo "         3. Inspect docker subsystem state:" >&2
+    echo "              sudo midclt call docker.config" >&2
+    echo "         4. If the toggle is wedged across multiple reboots, surface it on" >&2
+    echo "            the TrueNAS forum or open an issue on this repo with the output" >&2
+    echo "            of (2) and (3)." >&2
+    exit 1
+fi
+
 # --- MIG profile selection ---
 if [ -z "$MIG_PROFILES" ]; then
     EXISTING=""

@@ -524,12 +524,10 @@ echo "=== Verification ==="
 systemd-sysext status || true
 
 # NOTE: we intentionally do NOT attempt to re-enable docker.config.nvidia
-# here. TrueNAS resets it during boot and silently rejects re-enable for
-# the first ~5–10 min while the docker subsystem initializes. So any
-# pre-reboot set is futile in the driver-revert case (gets reset by
-# the upcoming reboot); we surface the post-reboot instructions
-# explicitly instead. See scripts/install-mig-sysext.sh for the long
-# comment explaining the boot-window behavior.
+# here. Empirically TrueNAS doesn't accept the toggle for some time after
+# boot in the driver-revert case — any pre-reboot set is futile because
+# it gets reset by the upcoming reboot anyway. We surface post-reboot
+# instructions explicitly instead.
 
 if $HAS_DRIVER; then
     cat <<EOF
@@ -542,25 +540,22 @@ userspace libs (no more NVML mismatch).
 
 Run: sudo reboot
 
->>> AFTER REBOOT — give it 5–10 minutes before flipping the Apps toggle <<<
+>>> AFTER REBOOT — re-enable the Apps' NVIDIA toggle <<<
 
-TrueNAS resets the Apps' NVIDIA toggle to OFF during boot and silently
-rejects re-enable attempts for the first ~5–10 minutes while the docker
-subsystem initializes. App services were turned off during uninstall so
-this state continues until you re-enable.
+On a freshly-booted TrueNAS host the apps subsystem won't accept the
+NVIDIA toggle for some time after boot — writes succeed but the value
+doesn't persist. Empirically it resolves within ~10 minutes; we don't
+know why. Apps were turned off during uninstall so this state continues
+until you flip the toggle back yourself.
 
-Once the box has been up for ~10 minutes, re-enable the toggle:
+Try the call until it sticks:
 
   sudo midclt call docker.update '{"nvidia": true}'
-
-  -- or --
-
-  Toggle the "Use NVIDIA GPU" switch on under TrueNAS UI →
-  Apps → Settings → 'Use NVIDIA GPU' → Save
-
-Verify it stuck (should print "nvidia = True"):
-
   sudo midclt call docker.config | python3 -c "import sys,json; print('nvidia =', json.load(sys.stdin).get('nvidia'))"
+
+If that prints `nvidia = False`, wait a minute and try again. Same flow
+in the UI: Apps → Settings → 'Use NVIDIA GPU' → Save (and verify by
+toggling away and back).
 EOF
 else
     cat <<EOF

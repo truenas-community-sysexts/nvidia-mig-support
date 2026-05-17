@@ -2,6 +2,16 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## configure-mig: wait for the TrueNAS app service before touching app state
+
+On a freshly-booted TrueNAS host the apps subsystem doesn't accept the `docker.update '{"nvidia": true}'` toggle for some time — calls return success but the value doesn't persist (a follow-up `docker.config` still reads `nvidia: False`). We don't know why; empirically it resolves within ~10 min. Running configure-mig inside that window let it complete most of its work, but the final apps-re-enable step silently no-op'd, so the GPU toggle was left OFF and apps came back without GPU access until the user noticed and flipped it manually.
+
+Previously the install and uninstall scripts addressed this with banners that told users to "wait 5–10 minutes after reboot, then run this midclt command and verify it stuck." That asks users to do something we can detect automatically, and the framing speculated about what TrueNAS does internally during the post-boot window — which we don't actually know.
+
+Fix: at the start of configure-mig (right after the nvidia-smi preflight, before any state changes), poll `midclt call docker.update '{"nvidia": true}'` → read back `docker.config.nvidia` until the write sticks. Up to 10 min with a visible progress counter. On success, proceed — `nvidia=true` is the post-configure-mig target state anyway. On timeout, exit non-zero with a clear error and suggested follow-up actions (wait longer, check middleware, check docker.config, file an issue if it's wedged across multiple reboots).
+
+Install and uninstall banners rewritten with non-speculative framing — no more claims about TrueNAS internals, just "the apps subsystem doesn't accept the toggle for some time after a fresh boot." Install banner points at the new auto-wait behavior. Uninstall banner (no follow-up auto-handler available) tells users to keep trying the toggle until it sticks.
+
 ## configure-mig: ignore stale UUIDs + cache original app state for restart
 
 Two follow-up bugs from the per-app-stop change one entry below, both surfaced on hardware test of release r16:

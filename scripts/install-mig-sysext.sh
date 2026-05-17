@@ -548,14 +548,12 @@ except Exception:
             "nvidia-mig.raw may not be currently merged"
     fi
 
-    # Apps' NVIDIA toggle (docker.config.nvidia). TrueNAS resets this to
-    # OFF during boot and silently rejects re-enable for ~5–10 min while
-    # the docker subsystem initializes; after the window passes the toggle
-    # sticks normally. We surface this as a warn (not a fail) and adjust
-    # the hint text based on system uptime so the user knows whether to
-    # wait or whether the window has already passed.
-    # Apps with GPU/MIG assignments work regardless of this toggle — the
-    # container runtime is wired up independently via nvidia-container-toolkit.
+    # Apps' NVIDIA toggle (docker.config.nvidia). Empirically the apps
+    # subsystem doesn't accept this toggle for some time after boot —
+    # we don't know why, but it typically resolves within ~10 min.
+    # configure-mig handles the wait automatically; this check just
+    # surfaces the current state as a warn (not a fail) so the user
+    # knows whether they need to do anything before running configure-mig.
     if command -v midclt >/dev/null 2>&1; then
         local nvidia_toggle uptime_s
         nvidia_toggle=$(midclt call docker.config 2>/dev/null \
@@ -571,11 +569,11 @@ except Exception:
             record_pass "Apps' NVIDIA toggle is on (docker.config.nvidia=true)"
         elif [ "$nvidia_toggle" = "false" ]; then
             if [ "${uptime_s:-0}" -lt 600 ]; then
-                record_warn "Apps' NVIDIA toggle is off (uptime $((uptime_s / 60)) min — TrueNAS rejects re-enable in the first ~10 min after boot)" \
-                    "wait until uptime > 10 min, then run 'sudo midclt call docker.update {\"nvidia\": true}' or toggle in the UI"
+                record_warn "Apps' NVIDIA toggle is off (uptime $((uptime_s / 60)) min — subsystem may not accept writes yet)" \
+                    "configure-mig will wait for it; or set manually: sudo midclt call docker.update {\"nvidia\": true}"
             else
                 record_warn "Apps' NVIDIA toggle is off (docker.config.nvidia=false)" \
-                    "run 'sudo midclt call docker.update {\"nvidia\": true}' or toggle Apps → Settings → 'Use NVIDIA GPU'"
+                    "configure-mig will set it; or run 'sudo midclt call docker.update {\"nvidia\": true}' manually"
             fi
         else
             record_warn "Could not read docker.config.nvidia" \
@@ -947,18 +945,15 @@ register_preinit "nvidia-mig-setup.service" \
 # Earlier revisions of this script attempted to re-enable the toggle here
 # (query → set → verify). We dropped that. Hardware testing showed:
 #
-#   1. Pre-reboot, the verify succeeds — but TrueNAS resets the toggle to
-#      OFF during the next boot regardless of what we set here.
+#   1. Pre-reboot, the verify succeeds — but the toggle resets to OFF on
+#      the next boot regardless of what we set here.
 #   2. Post-reboot, the same docker.update call silently fails to persist
-#      for the first ~5–10 minutes while the docker subsystem initializes.
-#      After that window, the call works again.
-#   3. Apps with GPU/MIG assignments work the entire time — the toggle is
-#      the docker-subsystem-level "is nvidia integration enabled"
-#      preference, but the container runtime is wired up independently
-#      via nvidia-container-toolkit (which we bundle in nvidia.raw).
+#      for some time (typically ~10 min). We don't know why; it resolves
+#      on its own.
 #
-# So a pre-reboot attempt gives a false sense of completion. The final
-# banner below makes the post-reboot-wait expectation explicit instead.
+# So a pre-reboot attempt gives a false sense of completion. configure-mig
+# now waits for the toggle to start accepting writes before doing anything
+# else; the final banner below points users at that.
 
 # ─────────────────────────────────────────────────────────────────────────
 # Done. Mode-appropriate finishing messages.
@@ -1027,31 +1022,25 @@ After reboot:
 
 Run: sudo reboot
 
->>> AFTER REBOOT — give it 5–10 minutes before flipping the Apps toggle <<<
+>>> AFTER REBOOT — configure-mig waits for the app service automatically <<<
 
-TrueNAS resets the Apps' NVIDIA toggle to OFF during boot and silently
-rejects re-enable attempts for the first ~5–10 minutes while the docker
-subsystem initializes. This is benign — apps with GPU/MIG assignments
-work the whole time (container runtime is independent of the toggle).
-
-Once the box has been up for ~10 minutes, re-enable the toggle:
-
-  sudo midclt call docker.update '{"nvidia": true}'
-
-  -- or --
-
-  Toggle the "Use NVIDIA GPU" switch on under TrueNAS UI →
-  Apps → Settings → 'Use NVIDIA GPU' → Save
-
-Verify it stuck (should print "nvidia = True"):
-
-  sudo midclt call docker.config | python3 -c "import sys,json; print('nvidia =', json.load(sys.stdin).get('nvidia'))"
+On a freshly-booted TrueNAS host the apps subsystem won't accept the
+NVIDIA toggle for some time after boot. configure-mig now handles this:
+it waits for the toggle to start accepting writes (up to 10 min) before
+doing anything that touches app state, and exits with a clear error if
+the wait runs out.
 
 DO NOT run configure-mig before rebooting — it will refuse with a
 driver/library-mismatch error. After the box is back up:
 
   sudo configure-mig                       # interactive prompt
   sudo configure-mig --mig=14,14,14,14     # non-interactive
+
+If you want to flip the toggle yourself before running configure-mig
+(e.g. to verify it accepts the write), this works too:
+
+  sudo midclt call docker.update '{"nvidia": true}'
+  sudo midclt call docker.config | python3 -c "import sys,json; print('nvidia =', json.load(sys.stdin).get('nvidia'))"
 EOF
     else
         echo "=== Install completed with errors — see FAIL lines above ==="
