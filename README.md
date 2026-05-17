@@ -191,6 +191,6 @@ All scripts support `--help` for the full flag list. The install script bundles 
 - [docs/refactor-history.md](docs/refactor-history.md) — design history of this refactor
 
 ## Credits
-
+- [zzzhouuu/truenas-nvidia-drivers](https://github.com/zzzhouuu/truenas-nvidia-drivers) - for the initial solution and inspiration this could be done
 - [biohazardious/truenas-nvidia-driver-updater](https://github.com/biohazardious/truenas-nvidia-driver-updater) — the snapshot-diff / two-level squashfs extraction approach that the driver build is ported from
 - [NVIDIA MIG User Guide](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/) — profile and capability reference
