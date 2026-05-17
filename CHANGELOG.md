@@ -2,6 +2,30 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## Uninstall tears down MIG runtime state (instances, mode, app assignments)
+
+Hardware-test finding: the unified `uninstall-nvidia-mig` (released in the prior changelog entry below) removed the **sysext + PREINIT + persist files**, but left:
+
+- MIG mode still Enabled in GPU firmware
+- MIG compute + GPU instances still alive
+- Each affected app's `nvidia_gpu_selection.<slot>.uuid` still pointing at the now-orphaned `MIG-…` UUID
+
+On next boot (without the now-deregistered PREINIT to recreate MIG instances) the apps would try to claim a stale UUID and fail to start. The intent of "uninstall MIG" is a clean revert; this filled the gap.
+
+Added a teardown phase that runs before sysext unmerge, gated on `nvidia-smi --query-gpu=mig.mode.current` == `Enabled`:
+
+1. Identify apps whose `nvidia_gpu_selection.<slot>.uuid` starts with `MIG-`.
+2. Stop those apps (per-app, with the same live-elapsed counter as configure-mig).
+3. Wait for the GPU to drain (visible counter).
+4. `nvidia-smi mig -dci` + `mig -dgi` to destroy compute and GPU instances.
+5. `nvidia-smi -mig 0` to disable MIG mode (firmware state).
+6. Read the full-GPU UUID via `nvidia-smi --query-gpu=uuid`.
+7. Per affected app: `app.update` with `nvidia_gpu_selection.<slot>.uuid = <full-gpu-uuid>`. Apps that were originally running are restarted with the new config.
+
+`mig.conf` is also removed from the persist dir in the non-`--keep-persist` cleanup pass (previously left behind as cruft).
+
+Final banner shows a "MIG runtime teardown summary" block when the teardown ran, so the user can confirm at a glance what state was cleaned.
+
 ## Unified uninstall + script-name fixups
 
 Follow-up to the unified-release refactor below. Same project shape (one release tag, two assets), but the script-side entrypoints get tightened:
