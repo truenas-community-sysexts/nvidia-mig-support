@@ -116,11 +116,40 @@ if ! $KEEP_PERSIST && [ -n "$PERSIST_DIR" ]; then
     echo "  (nvidia-original.raw and nvidia-mig.raw kept — MIG sysext still works on stock driver)"
 fi
 
-# --- Re-enable app services ---
-echo ""
-echo "Re-enabling app services..."
-midclt call docker.update '{"nvidia": true}' >/dev/null || true
+# Intentionally NOT calling `midclt call docker.update '{"nvidia": true}'`
+# here. At this point in the flow:
+#   - userspace libs in /usr are the stock driver (just cp'd from the
+#     persistent backup)
+#   - kernel modules in RAM are still the custom driver we just removed
+#   - NVML reports "Driver/library version mismatch"
+# Recent TrueNAS middleware validates docker.update by probing NVML, so
+# the call gets silently rejected and persisted as nvidia=false — the
+# script has no way to detect that (errors swallowed) and the user finds
+# the Apps "Use NVIDIA GPU" toggle off after reboot. Defer the re-enable
+# to the user, with explicit instructions in the final banner below.
 
 echo ""
-echo "=== Uninstall complete ==="
-echo "REBOOT REQUIRED for kernel modules to reload at the matching driver version."
+echo "=== Uninstall complete — REBOOT REQUIRED ==="
+echo ""
+echo "Kernel modules currently loaded are still the custom driver's."
+echo "After reboot, modules will load fresh from the stock sysext and"
+echo "match the userspace libs (no more NVML mismatch)."
+echo ""
+echo "Run: sudo reboot"
+echo ""
+echo ">>> AFTER REBOOT — one-time step to make Apps see the GPU again <<<"
+echo ""
+echo "App services were turned off during uninstall (so we could swap"
+echo "the driver). The matching re-enable was deliberately skipped"
+echo "because TrueNAS's middleware validates that call against NVML,"
+echo "which is in driver/library mismatch right now — the call would"
+echo "silently fail."
+echo ""
+echo "Once the box is back up and 'nvidia-smi' shows the stock driver, run:"
+echo ""
+echo "  sudo midclt call docker.update '{\"nvidia\": true}'"
+echo ""
+echo "  -- or --"
+echo ""
+echo "  Toggle the 'Use NVIDIA GPU' switch on under TrueNAS UI →"
+echo "  Apps → Settings → Configure → check 'Use NVIDIA GPU' → Save"

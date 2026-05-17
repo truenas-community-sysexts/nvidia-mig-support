@@ -907,16 +907,18 @@ register_preinit "nvidia-mig-setup.service" \
     "Start nvidia-mig-setup service (MIG instance recreation)" \
     120
 
-if $WITH_DRIVER; then
-    echo ""
-    echo "Re-enabling app services..."
-    if $DRY_RUN; then
-        echo "[dry-run] would: midclt call docker.update '{\"nvidia\": true}'"
-    else
-        midclt call docker.update '{"nvidia": true}' >/dev/null \
-            || echo "WARN: app services API call (docker.update) re-enable failed"
-    fi
-fi
+# Intentionally NOT calling `midclt call docker.update '{"nvidia": true}'`
+# here. At this point in the --with-driver flow:
+#   - userspace libs in /usr are the new driver's (just cp'd and merged)
+#   - kernel modules in RAM are still the previous driver's
+#   - NVML reports "Driver/library version mismatch"
+# Recent TrueNAS middleware validates docker.update by probing NVML, so
+# the call gets silently rejected and persisted as nvidia=false — the
+# script has no way to detect that (errors swallowed by ||true) and the
+# user finds the Apps "Use NVIDIA GPU" toggle off after reboot. We defer
+# the re-enable to the user, with explicit instructions in the final
+# banner below. The first docker.update earlier ('{"nvidia": false}')
+# ran while NVML was still healthy, so it worked fine.
 
 # ─────────────────────────────────────────────────────────────────────────
 # Done. Mode-appropriate finishing messages.
@@ -984,6 +986,22 @@ After reboot:
   - if you have mig.conf in $PERSIST_DIR, MIG instances are recreated
 
 Run: sudo reboot
+
+>>> AFTER REBOOT — one-time step to make Apps see the GPU again <<<
+
+App services were turned off during install (so we could swap the
+driver). The matching re-enable was deliberately skipped because
+TrueNAS's middleware validates that call against NVML, which is in
+"driver/library mismatch" right now — the call would silently fail.
+
+Once the box is back up and 'nvidia-smi' shows the new driver, run:
+
+  sudo midclt call docker.update '{"nvidia": true}'
+
+  -- or --
+
+  Toggle the "Use NVIDIA GPU" switch on under TrueNAS UI →
+  Apps → Settings → Configure → check 'Use NVIDIA GPU' → Save
 
 DO NOT run configure-mig before rebooting — it will refuse with a
 driver/library-mismatch error. After the box is back up:
