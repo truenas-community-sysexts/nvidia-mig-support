@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# TrueNAS PREINIT for the full-driver sysext path.
+# TrueNAS PREINIT for the custom-driver sysext path.
 #
-# Three responsibilities, all must run before Docker starts:
+# Two responsibilities, both must run before Docker starts:
 #   1. Survive TrueNAS updates. /usr gets replaced on update, which wipes
 #      our custom nvidia.raw and restores stock. Compare SHAs between live
 #      and persistent backup; if they differ, restore the custom.
@@ -11,12 +11,16 @@
 #      loudly in syslog with a pointer at the release page so the user
 #      doesn't end up debugging "nvidia-smi reports no devices" via
 #      strace.
-#   3. Start nvidia-mig-setup.service (idempotent) so MIG instances are
-#      recreated each boot.
 #
-# Registered via midclt initshutdownscript by install-nvidia-sysext.sh.
+# MIG service start is NOT handled here — install-sysext.sh registers a
+# separate PREINIT entry that runs `systemctl start nvidia-mig-setup.service`.
+# That ordering doesn't matter: nvidia-mig-setup has a built-in wait for
+# the driver to become responsive (not just for the nvidia-smi binary to
+# appear), so the two PREINITs can fire in either order without coordination.
+#
+# Registered via midclt initshutdownscript by install-sysext.sh --with-driver.
 # Logs to both stdout (visible via journalctl -u <init-shutdown-script>)
-# and syslog tagged `nvidia-preinit-full` (journalctl -b -t nvidia-preinit-full
+# and syslog tagged `nvidia-preinit-driver` (journalctl -b -t nvidia-preinit-driver
 # for boot-scoped filtering).
 #
 # Never exits non-zero — must not block boot. All errors are logged and
@@ -26,8 +30,8 @@
 set -uo pipefail
 
 log() {
-    echo "[nvidia-preinit-full] $*"
-    logger -t nvidia-preinit-full "$*" 2>/dev/null || true
+    echo "[nvidia-preinit-driver] $*"
+    logger -t nvidia-preinit-driver "$*" 2>/dev/null || true
 }
 
 # Track /usr writable state for the trap. Without this, a SIGTERM
@@ -153,22 +157,13 @@ else
     if [ -n "$SYSEXT_KVER" ]; then
         log "ERROR: kernel-version mismatch — running ${RUNNING_KVER} but sysext bundles modules for ${SYSEXT_KVER}"
         log "ERROR: TrueNAS was likely updated to a new kernel. Re-install a sysext matching ${RUNNING_KVER}:"
-        log "ERROR:   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install-nvidia-sysext.sh | sudo bash"
+        log "ERROR:   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install-sysext.sh | sudo bash -s -- --with-driver"
         log "ERROR:   (auto-detects the new TrueNAS version and picks a matching release)"
         log "ERROR: Or browse: https://github.com/${REPO}/releases"
     else
         log "WARNING: nvidia.ko not found anywhere under ${RUNNING_KO_DIR}/ and no other kernel-version directory has one either"
         log "WARNING: the sysext may not be merged, or the build is broken — check 'systemd-sysext status'"
     fi
-fi
-
-# ── Phase 3: start the bundled MIG service (idempotent) ──────────────────
-if [ -x /usr/bin/nvidia-mig-setup ]; then
-    log "Starting nvidia-mig-setup.service"
-    systemctl start nvidia-mig-setup.service \
-        || log "WARN: systemctl start nvidia-mig-setup.service failed"
-else
-    log "/usr/bin/nvidia-mig-setup not present; skipping MIG service start"
 fi
 
 log "Done"

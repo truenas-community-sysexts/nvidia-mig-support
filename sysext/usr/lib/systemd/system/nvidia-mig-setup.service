@@ -2,8 +2,11 @@
 Description=NVIDIA MIG Instance Setup
 # Activated at boot by a TrueNAS PREINIT entry (midclt initshutdownscript),
 # not by WantedBy=multi-user.target — sysext-shipped Install symlinks aren't
-# reliably honored by TrueNAS's boot path. The script itself also waits up
-# to 60s for /usr/bin/nvidia-smi in case the stock sysext hasn't merged yet.
+# reliably honored by TrueNAS's boot path. The script itself waits up to
+# 60s for the NVIDIA driver to become responsive (nvidia-smi -L succeeds),
+# which covers the stock-sysext-merge race, the custom-driver-restore race
+# (when nvidia-preinit-driver runs concurrently from install-sysext.sh
+# --with-driver), and the udev/modprobe module-load race.
 After=systemd-sysext.service local-fs.target
 
 [Service]

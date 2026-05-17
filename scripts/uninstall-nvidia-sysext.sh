@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Restore stock nvidia.raw from /mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw
-# and remove the full-driver PREINIT entry. Counterpart to install-nvidia-sysext.sh.
+# and remove the custom-driver PREINIT entry. Counterpart to
+# `install-sysext.sh --with-driver`. Leaves the MIG sysext (nvidia-mig.raw)
+# in place — it works on top of either the stock or a custom driver.
 #
 # This script is also bundled into the custom nvidia.raw as
 # /usr/bin/uninstall-nvidia-driver so users can run
@@ -73,14 +75,14 @@ else
     echo "  (run recover-stock-nvidia.sh later to fetch one if needed)"
 fi
 
-# --- Deregister PREINIT ---
+# --- Deregister driver PREINIT (matches both new and legacy names) ---
 PREINIT_ID=$(midclt call initshutdownscript.query 2>/dev/null \
     | python3 -c "
 import sys, json
 try:
     for s in json.load(sys.stdin):
         cmd = (s.get('command') or '') + ' ' + (s.get('script') or '')
-        if 'nvidia-preinit-full' in cmd:
+        if 'nvidia-preinit-driver' in cmd or 'nvidia-preinit-full' in cmd:
             print(s['id'], end=''); break
 except Exception:
     pass
@@ -88,17 +90,19 @@ except Exception:
 
 if [ -n "$PREINIT_ID" ]; then
     midclt call initshutdownscript.delete "$PREINIT_ID" >/dev/null 2>&1 \
-        && echo "Deregistered PREINIT entry (id $PREINIT_ID)" \
+        && echo "Deregistered driver PREINIT entry (id $PREINIT_ID)" \
         || echo "WARN: deregister failed"
 else
-    echo "No matching PREINIT entry found"
+    echo "No matching driver PREINIT entry found"
 fi
 
 # --- Cleanup persistent storage ---
 if ! $KEEP_PERSIST && [ -n "$PERSIST_DIR" ]; then
-    rm -f "$PERSIST_DIR/nvidia.raw" "$PERSIST_DIR/nvidia-preinit-full.sh"
-    echo "Removed custom nvidia.raw and PREINIT script from $PERSIST_DIR"
-    echo "  (nvidia-original.raw kept — pass --keep-persist=false to also remove)"
+    rm -f "$PERSIST_DIR/nvidia.raw" \
+          "$PERSIST_DIR/nvidia-preinit-driver.sh" \
+          "$PERSIST_DIR/nvidia-preinit-full.sh"
+    echo "Removed custom nvidia.raw and driver PREINIT script from $PERSIST_DIR"
+    echo "  (nvidia-original.raw and nvidia-mig.raw kept — MIG sysext still works on stock driver)"
 fi
 
 # --- Re-enable Docker ---

@@ -1,6 +1,6 @@
 # MIG Persistence: surviving reboots and TrueNAS updates
 
-MIG instances on Blackwell don't survive reboots, and TrueNAS updates rewrite `/usr` from scratch. This doc explains how the dual-sysext model handles both, and what to expect under each install path.
+MIG instances on Blackwell don't survive reboots, and TrueNAS updates rewrite `/usr` from scratch. This doc explains how the two-sysext model handles both, and what to expect under each install variant of `install-sysext.sh` (default vs `--with-driver`).
 
 ## What persists where
 
@@ -17,7 +17,7 @@ MIG instances on Blackwell don't survive reboots, and TrueNAS updates rewrite `/
 
 Both install paths register a TrueNAS PREINIT entry via `midclt initshutdownscript.create`. PREINIT runs early in boot, before `docker.service`, after `systemd-sysext` has merged `/usr`. PREINIT entries live in TrueNAS's middleware DB, so they survive updates.
 
-### Lightweight path PREINIT
+### Default path: one PREINIT
 
 A single command:
 
@@ -27,22 +27,24 @@ A single command:
 
 That's it. The service is shipped inside `nvidia-mig.raw`. Once started, it reads `mig.conf` from persistent storage and creates the MIG instances. The stock `nvidia.raw` is untouched, so there's nothing to restore after a TrueNAS update — the sysext symlink in `/etc/extensions/nvidia-mig.raw` points at the persistent copy on `/mnt/<pool>/`, which survives.
 
-### Full-driver path PREINIT
+### --with-driver path: two PREINITs
 
-Runs `/mnt/<pool>/.config/nvidia-gpu/nvidia-preinit-full.sh`, which:
+`install-sysext.sh --with-driver` registers a **second** PREINIT alongside the MIG one. The driver PREINIT runs `/mnt/<pool>/.config/nvidia-gpu/nvidia-preinit-driver.sh`, which:
 
 1. Compares SHA256 of the live `/usr/share/truenas/sysext-extensions/nvidia.raw` against the persistent custom `/mnt/<pool>/.config/nvidia-gpu/nvidia.raw`.
 2. If they match → normal boot. Nothing to do here.
 3. If they differ → TrueNAS update happened, `/usr` was wiped, stock driver is back. Re-apply the custom: `systemd-sysext unmerge` → `zfs set readonly=off /usr` → `cp` custom over live → `zfs set readonly=on` → ensure `/etc/extensions/nvidia.raw` symlink → `systemd-sysext merge` → `systemctl daemon-reload`.
-4. Then `systemctl start nvidia-mig-setup.service` to recreate MIG instances.
+4. Logs kernel-version mismatch if `nvidia.ko`'s `vermagic` doesn't match the running kernel.
 
-The script is installed once during `install-nvidia-sysext.sh` and re-registered after every update because the PREINIT DB entry persists.
+The driver PREINIT does **not** start the MIG service — that's the MIG PREINIT's job. Splitting the two means the driver script is concerned only with driver state, and the MIG-side wait for the driver to become responsive (see below) lets the two PREINITs fire in any order without coordination.
+
+The script is installed once during `install-sysext.sh --with-driver` and re-registered after every update because the PREINIT DB entry persists.
 
 ## What `nvidia-mig-setup.service` actually does
 
 The unit is `Type=oneshot RemainAfterExit=yes`. `ExecStart=/usr/bin/nvidia-mig-setup`, which is a bash script that:
 
-1. Polls up to 60 s for `/usr/bin/nvidia-smi` to appear (in case the stock NVIDIA sysext hasn't finished merging yet).
+1. Polls up to 60 s for the NVIDIA driver to become responsive (`nvidia-smi -L` succeeds — not just for the binary to exist). Subsumes three races: stock sysext still merging, sibling driver PREINIT still restoring a custom `nvidia.raw`, and udev/modprobe still loading the kernel module.
 2. Reads `MIG_PROFILES` from `/mnt/<pool>/.config/nvidia-gpu/mig.conf` (glob — any pool name works).
 3. Enables MIG mode if not enabled (`nvidia-smi -mig 1`).
 4. Destroys any existing MIG instances, then creates new ones from the profile list.
@@ -59,48 +61,52 @@ MIG UUIDs are **deterministic** on Blackwell — same GPU + same profile config 
 ```text
 /mnt/<pool>/.config/nvidia-gpu/
   nvidia-original.raw          # stock backup (kept across uninstalls)
-  nvidia.raw                   # custom driver (full-driver path only)
-  nvidia-mig.raw               # lightweight sysext (lightweight path only)
+  nvidia.raw                   # custom driver (--with-driver path only)
+  nvidia-mig.raw               # MIG sysext (always)
   mig.conf                     # MIG_PROFILES=14,14,14,14
-  nvidia-preinit-full.sh       # PREINIT script for full-driver path
+  nvidia-preinit-driver.sh     # driver PREINIT (--with-driver path only)
 ```
 
 Pool auto-detected as the first non-`boot-pool` from `zpool list`. Override with `--pool=NAME` or `--persist-path=PATH` on any install/uninstall script.
 
 ## Boot timing per path
 
-### Lightweight path
+### Default path
 
 ```text
 1. Kernel boots, modules load (stock 570.x driver from stock nvidia.raw)
 2. systemd-sysext merges nvidia.raw + nvidia-mig.raw + hailo.raw
 3. systemctl daemon-reload picks up nvidia-mig-setup.service unit
 4. TrueNAS middleware starts
-5. PREINIT entries run: systemctl start nvidia-mig-setup.service
-6. nvidia-mig-setup polls for nvidia-smi (present from step 2), reads mig.conf
+5. PREINIT entry runs: systemctl start nvidia-mig-setup.service
+6. nvidia-mig-setup polls until `nvidia-smi -L` succeeds, reads mig.conf
 7. MIG mode enable + instance creation + app remap (if needed)
 8. docker.service starts → containers can claim MIG UUIDs
 ```
 
 Total nvidia-mig-setup runtime: typically ~45 s (most of it the middleware-ready poll).
 
-### Full-driver path
+### --with-driver path
 
 ```text
 1. Kernel boots, modules load from /usr/lib/modules/<kernel>/video/ (custom driver)
-2. systemd-sysext merges nvidia.raw (custom) + hailo.raw
+2. systemd-sysext merges nvidia.raw (custom) + nvidia-mig.raw + hailo.raw
 3. systemctl daemon-reload picks up nvidia-mig-setup.service unit
 4. TrueNAS middleware starts
-5. PREINIT entry runs: nvidia-preinit-full.sh
-     - compares SHA(live) vs SHA(persistent custom)
-     - if same: skip restore (normal boot)
-     - if different: full restore dance (TrueNAS update happened)
-   then: systemctl start nvidia-mig-setup.service
-6. nvidia-mig-setup runs the MIG enable + create + remap flow
-7. docker.service starts
+5. Two PREINIT entries run (order doesn't matter):
+   a. nvidia-preinit-driver.sh
+        - compares SHA(live) vs SHA(persistent custom)
+        - if same: skip restore (normal boot)
+        - if different: full restore dance (TrueNAS update happened)
+        - logs any kernel-version mismatch
+   b. systemctl start nvidia-mig-setup.service
+        - polls until `nvidia-smi -L` succeeds (handles any in-flight
+          restore from (a) above OR udev module-load latency)
+        - MIG enable + create + remap
+6. docker.service starts
 ```
 
-After a TrueNAS update the first boot is longer (the restore dance adds 5–10 s). Subsequent boots are the same as the lightweight path.
+After a TrueNAS update the first boot is longer (the restore dance adds 5–10 s). Subsequent boots are the same as the default path.
 
 ## Uninstall / restore
 

@@ -50,7 +50,7 @@ cp "${REPO_ROOT}/sysext/usr/lib/systemd/system/nvidia-mig-setup.service" \
 chmod 0644 "${STAGE}/usr/lib/systemd/system/nvidia-mig-setup.service"
 
 # No multi-user.target.wants symlink — boot activation is via a TrueNAS
-# PREINIT entry registered by install-mig-sysext.sh, not via WantedBy.
+# PREINIT entry registered by install-sysext.sh, not via WantedBy.
 
 if [ -n "$DMS_PATH" ]; then
     [ -f "$DMS_PATH" ] || { echo "displaymodeselector not found: $DMS_PATH" >&2; exit 1; }

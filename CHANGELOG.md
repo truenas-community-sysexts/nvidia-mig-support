@@ -2,6 +2,19 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## Unified Sysext Release (single tag, single install script)
+
+Breaking refactor that collapses two parallel release lines into one tag, and two install scripts into one with a `--with-driver` flag.
+
+- **Single release tag carries both assets.** Every release is now `v<truenas>-nvidia<driver>-r<run>` with both `nvidia.raw` (driver-only) and `nvidia-mig.raw` (MIG tooling) attached. Old `v<truenas>-mig-r<run>` releases remain valid (immutable) but no new ones will be produced. NVIDIA-only bumps still rebuild `nvidia-mig.raw` at byte-equivalent content — accepted as simpler than conditional asset attachment.
+- **`nvidia.raw` is now driver-only.** The `BUNDLE_MIG` knob and `--no-mig-bundle` flag are gone. `nvidia.raw` never contains MIG tooling; that lives exclusively in `nvidia-mig.raw`. Removes the dual-MIG-source collision risk and the bundled-vs-standalone framing that made `--check` reporting confusing.
+- **`install-sysext.sh` replaces the two install scripts.** Default = MIG-only on stock driver (no reboot, no `/usr` r/w — same as the old `install-mig-sysext.sh`). `--with-driver` = downloads both assets, swaps the driver (`/usr` r/w via zfs `readonly=off`/`on`, single re-merge cycle covers both sysexts), registers two PREINIT entries, prompts reboot. Old `install-mig-sysext.sh` and `install-nvidia-sysext.sh` are deleted — users who hard-coded those URLs will need to update.
+- **Two independent PREINIT entries with no ordering dependency.** `--with-driver` registers `nvidia-preinit-driver.sh` (custom-driver restore + kernel-mismatch detection) AND `systemctl start nvidia-mig-setup.service` (MIG instance creation) as separate `midclt initshutdownscript` rows. The MIG service has a built-in wait for `nvidia-smi -L` to succeed — covers stock-sysext-still-merging, driver-PREINIT-still-restoring, and udev-still-loading-modules in one 60 s poll. PREINITs can fire in any order without coordination.
+- **`nvidia-preinit-full.sh` renamed to `nvidia-preinit-driver.sh`** and stripped of its MIG service start (Phase 3). It's now driver-side concerns only. Syslog tag changes from `nvidia-preinit-full` to `nvidia-preinit-driver`. The legacy file is auto-cleaned by `install-sysext.sh --with-driver` and detected as a warning by `--check`.
+- **One unified build workflow.** `build-nvidia-sysext.yml` + `build-mig-sysext.yml` collapse to `build-sysext.yml`: one `resolve` job feeding two parallel build jobs (`build-nvidia`, `build-mig`) and a single `publish` job that attaches both assets to one release. Hardware-test issue auto-creation is one issue per release with checklists for both install variants.
+- **`check-releases.yml` dispatches the unified workflow** on any TrueNAS-or-NVIDIA bump (was: two separate dispatches with TrueNAS-only gating on the MIG side).
+- **Smoke-tests reflect the separation.** `nvidia.raw` smoke-test asserts driver bits are present AND that MIG bits are **absent** (catches future regressions if someone reintroduces bundling). `nvidia-mig.raw` smoke-test stays as before.
+
 ## Install / Uninstall Scripts
 
 - **Bundled uninstall scripts.** Both `nvidia.raw` and `nvidia-mig.raw` ship with their respective uninstaller at `/usr/bin/uninstall-nvidia-driver` and `/usr/bin/uninstall-nvidia-mig`, so users can uninstall without re-downloading from the release.

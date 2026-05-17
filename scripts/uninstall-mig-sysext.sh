@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Remove the lightweight nvidia-mig sysext deployed by install-mig-sysext.sh.
-# Does NOT touch the stock TrueNAS nvidia.raw or any MIG mode state.
+# Remove the lightweight nvidia-mig sysext (deployed by install-sysext.sh).
+# Does NOT touch the stock or custom nvidia.raw, and does NOT clear any
+# MIG mode state on the device itself — you can re-install at any time.
 #
 # This script is also bundled into nvidia-mig.raw as /usr/bin/uninstall-nvidia-mig
 # so users can run `sudo uninstall-nvidia-mig` after install without a curl|bash.

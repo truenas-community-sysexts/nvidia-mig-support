@@ -332,14 +332,16 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # ─────────────────────────────────────────────────────────────────────
-      # Trigger the full-driver build. mark_latest='false' means the build
+      # Trigger the unified build. mark_latest='false' means the build
       # produces a release but does not promote it to GitHub "Latest" — that
       # promotion waits on a successful hardware test (see the auto-created
       # `hardware-test` issue on the new release).
-      # Triggered whenever EITHER TrueNAS OR NVIDIA bumped (full driver is
-      # parameterized by both).
+      # Triggered whenever EITHER TrueNAS OR NVIDIA bumped (the unified
+      # release carries both nvidia.raw and nvidia-mig.raw; NVIDIA-only
+      # bumps still rebuild nvidia-mig.raw at byte-equivalent content,
+      # accepted as simpler than conditional asset attachment).
       # ─────────────────────────────────────────────────────────────────────
-      - name: Trigger Build Full NVIDIA Sysext
+      - name: Trigger Build Sysext
         if: steps.truenas.outputs.changed == 'true' || steps.nvidia.outputs.changed == 'true'
         uses: actions/github-script@v9
         with:
@@ -347,38 +349,14 @@ jobs:
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              workflow_id: 'build-nvidia-sysext.yml',
+              workflow_id: 'build-sysext.yml',
               ref: 'main',
               inputs: {
                 truenas_version:    '${{ steps.write.outputs.truenas_version }}',
                 train_name:         '${{ steps.write.outputs.train }}',
                 nvidia_version:     '${{ steps.write.outputs.nvidia_driver }}',
                 kernel_module_type: '${{ steps.write.outputs.kernel_module_type }}',
-                bundle_mig:         true,
                 mark_latest:        'false'
               }
             });
-            console.log('Dispatched build-nvidia-sysext.yml: TrueNAS ${{ steps.write.outputs.truenas_version }} (${{ steps.write.outputs.train }}), NVIDIA ${{ steps.write.outputs.nvidia_driver }} (${{ steps.write.outputs.kernel_module_type }})');
-
-      # ─────────────────────────────────────────────────────────────────────
-      # Trigger the MIG sysext build. Only fires on TrueNAS bumps — MIG
-      # content is TrueNAS-version-parameterized for tag/context only;
-      # NVIDIA driver bumps don't change the MIG sysext content.
-      # ─────────────────────────────────────────────────────────────────────
-      - name: Trigger Build MIG Sysext
-        if: steps.truenas.outputs.changed == 'true'
-        uses: actions/github-script@v9
-        with:
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'build-mig-sysext.yml',
-              ref: 'main',
-              inputs: {
-                truenas_version: '${{ steps.write.outputs.truenas_version }}',
-                train_name:      '${{ steps.write.outputs.train }}',
-                mark_latest:     'false'
-              }
-            });
-            console.log('Dispatched build-mig-sysext.yml: TrueNAS ${{ steps.write.outputs.truenas_version }} (${{ steps.write.outputs.train }})');
+            console.log('Dispatched build-sysext.yml: TrueNAS ${{ steps.write.outputs.truenas_version }} (${{ steps.write.outputs.train }}), NVIDIA ${{ steps.write.outputs.nvidia_driver }} (${{ steps.write.outputs.kernel_module_type }})');

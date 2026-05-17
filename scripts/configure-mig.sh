@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Configure MIG layout + map MIG devices to TrueNAS apps.
 #
-# Runs after install-mig-sysext.sh (lightweight path) or after the reboot
-# following install-nvidia-sysext.sh (full-driver path). Either path is
-# fine — by the time configure-mig.sh runs, /usr/bin/nvidia-smi must work
-# and middleware must be up.
+# Runs after install-sysext.sh (default path: no reboot) or after the
+# reboot following install-sysext.sh --with-driver. Either path is fine —
+# by the time configure-mig.sh runs, /usr/bin/nvidia-smi must work and
+# middleware must be up.
 #
 # Usage:
 #   sudo ./configure-mig.sh                        # interactive: prompt for profiles
@@ -144,11 +144,10 @@ profile_label() {
 }
 
 # --- Resolve persistent dir ---
-# resolve_persist_dir is duplicated verbatim across install-mig-sysext.sh,
-# install-nvidia-sysext.sh, configure-mig.sh, and recover-stock-nvidia.sh.
-# Inline (rather than sourced from a sibling file) so each script remains
-# a self-contained curl|bash artifact. Keep these copies in sync when
-# changing the function.
+# resolve_persist_dir is duplicated verbatim across install-sysext.sh,
+# configure-mig.sh, and recover-stock-nvidia.sh. Inline (rather than
+# sourced from a sibling file) so each script remains a self-contained
+# curl|bash artifact. Keep these copies in sync when changing the function.
 resolve_persist_dir() {
     PERSIST_DIR=""
     local d p
@@ -247,8 +246,8 @@ else
     if echo "$NVIDIA_ERR" | grep -qi "version mismatch"; then
         echo "" >&2
         echo "ERROR: kernel modules and userspace libraries are different driver versions." >&2
-        echo "       This is expected immediately after install-nvidia-sysext.sh and" >&2
-        echo "       resolves itself after a reboot loads matching kernel modules." >&2
+        echo "       This is expected immediately after 'install-sysext.sh --with-driver'" >&2
+        echo "       and resolves itself after a reboot loads matching kernel modules." >&2
         echo "" >&2
         echo "       Reboot first, then re-run configure-mig:" >&2
         echo "" >&2

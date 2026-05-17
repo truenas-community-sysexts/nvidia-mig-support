@@ -41,18 +41,20 @@ Server Edition cards and previous-gen workstation cards (e.g. RTX A6000) don't n
                 │                                                          │
                 │   /mnt/<pool>/.config/nvidia-gpu/                        │
                 │     ├─ nvidia-original.raw  (stock backup, always kept) │
-                │     ├─ nvidia.raw           (custom, full-driver path)  │
-                │     ├─ nvidia-mig.raw       (lightweight path)          │
+                │     ├─ nvidia.raw           (custom, --with-driver only)│
+                │     ├─ nvidia-mig.raw       (always)                    │
                 │     ├─ mig.conf             (MIG_PROFILES=...)          │
-                │     └─ nvidia-preinit-full.sh (full-driver path only)   │
+                │     └─ nvidia-preinit-driver.sh (--with-driver only)    │
                 └─────────────────────────────────────────────────────────┘
 ```
 
 The GPU sees one merged userspace via `systemd-sysext`. Multiple `.raw` extensions overlay onto `/usr` together — no file conflicts because each owns disjoint paths.
 
-## The two install paths
+## The two install variants
 
-### Lightweight path (`nvidia-mig.raw`)
+`install-sysext.sh` operates in one of two modes; the **same** release supplies the assets for both. The MIG sysext is always installed; the custom driver is layered underneath only when `--with-driver` is passed.
+
+### Default (`nvidia-mig.raw` only)
 
 Adds MIG tooling on top of TrueNAS's stock NVIDIA driver. The stock `nvidia.raw` is untouched.
 
@@ -69,20 +71,22 @@ Adds MIG tooling on top of TrueNAS's stock NVIDIA driver. The stock `nvidia.raw`
               └─ /usr/lib/extension-release.d/extension-release.nvidia-mig  (ID=_any)
 ```
 
-Built locally in <1 s via `mksquashfs`. Each `Build MIG Sysext` workflow run publishes an immutable `v<truenas>-mig-r<run>` release (manual dispatch promotes it to "Latest"; auto-cadence dispatches open a hardware-test issue first). See [docs/build-ci-notes.md](build-ci-notes.md#release-tagging-scheme) for the tag scheme.
+Built locally in <1 s via `mksquashfs`. See [docs/build-ci-notes.md](build-ci-notes.md#release-tagging-scheme) for the tag scheme.
 
-### Full-driver path (`nvidia.raw`)
+### `--with-driver` (`nvidia.raw` + `nvidia-mig.raw`)
 
-Replaces the stock `nvidia.raw` with one containing a different driver version (e.g. 580.126.18 or 590.44.01), plus bundled MIG tooling so the sysext is self-sufficient.
+Swaps the stock `nvidia.raw` for one containing a different driver version (e.g. 580.126.18 or 590.44.01), and installs the same `nvidia-mig.raw` from above on top.
 
 ```text
-       nvidia.raw (custom, ~470 MB)
+       nvidia.raw (custom, driver-only, ~420 MB)
             │
             ├─ NVIDIA driver (libs, .ko modules, nvidia-smi, …)
             ├─ nvidia-container-toolkit
-            ├─ /usr/bin/nvidia-mig-setup           (boot-time creator)
-            ├─ /usr/bin/configure-mig              (interactive setup)
-            └─ /usr/lib/systemd/system/nvidia-mig-setup.service
+            └─ /usr/bin/uninstall-nvidia-driver    (local revert helper)
+            +
+       hailo.raw (untouched)
+            +
+       nvidia-mig.raw (same as default path — MIG tooling lives here only)
 ```
 
 Built on an `ubuntu-24.04` GitHub Actions runner (no Docker) in ~8 min. Ports biohazardious/truenas-nvidia-driver-updater's `entrypoint.sh`:
@@ -95,50 +99,48 @@ Built on an `ubuntu-24.04` GitHub Actions runner (no Docker) in ~8 min. Ports bi
 6. Snapshot diff of `/usr`+`/etc` before/after to find every installer-added file
 7. Stage all new files into a clean tree, remap `/etc/OpenCL`, `/etc/vulkan`, `/etc/nvidia-container-*` → `/usr/share/...`
 8. Generate a combined `modules.dep` covering both system and nvidia `.ko` files
-9. Bundle our MIG script + service
-10. `mksquashfs -comp gzip` + `extension-release.nvidia` with `ID=_any`
+9. `mksquashfs -comp gzip` + `extension-release.nvidia` with `ID=_any`
 
-Workflow dispatch input controls `nvidia_version`, `truenas_version`, `kernel_module_type` (open/proprietary), and whether to bundle MIG.
+The driver build is intentionally driver-only — MIG tooling never lives in `nvidia.raw`. See [docs/build-ci-notes.md#driver-vs-mig-separation-of-concerns](build-ci-notes.md#driver-vs-mig-separation-of-concerns) for why.
+
+Workflow dispatch input controls `nvidia_version`, `truenas_version`, `kernel_module_type` (open/proprietary), and `train_name`.
 
 ## Building a custom nvidia.raw
 
-The daily `check-releases.yml` workflow watches `download.nvidia.com/.../latest.txt` and `truenas/scale-build` tags and fires `Build Full NVIDIA Sysext` automatically when either moves, producing a fresh `v<truenas>-nvidia<driver>-r<run>` release marked `mark_latest=false` until a human hardware-verifies it (see [docs/build-ci-notes.md](build-ci-notes.md#auto-cadence-check-releasesyml)). If you want a different combination — older driver, proprietary kernel modules, a different TrueNAS version, `--no-mig-bundle` — trigger a parameterized build via `workflow_dispatch`:
+The daily `check-releases.yml` workflow watches `download.nvidia.com/.../latest.txt` and `truenas/scale-build` tags and fires `build-sysext.yml` automatically when either moves, producing a fresh `v<truenas>-nvidia<driver>-r<run>` release carrying both `nvidia.raw` (driver-only) and `nvidia-mig.raw`, marked `mark_latest=false` until a human hardware-verifies it (see [docs/build-ci-notes.md](build-ci-notes.md#auto-cadence-check-releasesyml)). If you want a different combination — older driver, proprietary kernel modules, a different TrueNAS version — trigger a parameterized build via `workflow_dispatch`:
 
 ```bash
-gh workflow run build-nvidia-sysext.yml \
+gh workflow run build-sysext.yml \
   -f nvidia_version=590.44.01 \
   -f truenas_version=26.0.0-BETA.1 \
-  -f kernel_module_type=open \
-  -f bundle_mig=true \
-  -f release_tag=my-custom-release
+  -f kernel_module_type=open
 ```
 
 Inputs:
 
 | Input | Default | Notes |
 | --- | --- | --- |
-| `nvidia_version` | `580.126.18` | Any version published at `us.download.nvidia.com/XFree86/Linux-x86_64/` |
-| `truenas_version` | `25.10.3.1` | Used to download the official `.update` file for kernel-header extraction |
-| `kernel_module_type` | `open` | `open` recommended for Blackwell; `proprietary` for legacy GPUs |
-| `truenas_codename` | *(auto)* | Auto-detected for 25.x (`Goldeye`); set explicitly for 26.x BETAs |
-| `bundle_mig` | `true` | Bundle our MIG script + service into the sysext |
-| `release_tag` | *(empty)* | If set, attach the built `nvidia.raw` to a GitHub release with this tag. `dev-*` tags get `--prerelease` automatically. |
+| `nvidia_version` | *(tracked)* | Any version published at `us.download.nvidia.com/XFree86/Linux-x86_64/` |
+| `truenas_version` | *(tracked)* | Used to download the official `.update` file for kernel-header extraction |
+| `kernel_module_type` | *(tracked)* | `open` recommended for Blackwell; `proprietary` for legacy GPUs |
+| `train_name` | *(tracked)* | Auto-tracked from `.github/tracked-versions.json`; usually `Goldeye` for 25.x |
+| `mark_latest` | `true` | Set `false` to publish without promoting to GitHub "Latest" |
 
-Build runs on `ubuntu-24.04` in ~8 min. The workflow itself lives at [.github/workflows/build-nvidia-sysext.yml](../.github/workflows/build-nvidia-sysext.yml); the build logic in [scripts/build-nvidia-sysext.sh](../scripts/build-nvidia-sysext.sh) — a native-runner port of [biohazardious/truenas-nvidia-driver-updater](https://github.com/biohazardious/truenas-nvidia-driver-updater) (no Docker, no scale-build).
+Build runs on `ubuntu-24.04` in ~8 min. The workflow itself lives at [.github/workflows/build-sysext.yml](../.github/workflows/build-sysext.yml); the driver build logic in [scripts/build-nvidia-sysext.sh](../scripts/build-nvidia-sysext.sh) (a native-runner port of [biohazardious/truenas-nvidia-driver-updater](https://github.com/biohazardious/truenas-nvidia-driver-updater) — no Docker, no scale-build); the MIG build in [scripts/build-mig-sysext.sh](../scripts/build-mig-sysext.sh).
 
 Once built and attached to a release, install it from TrueNAS:
 
 ```bash
-# Download the artifact from your custom release
+# Download the driver artifact from your custom release
 curl -fL -o /tmp/nvidia.raw \
-  https://github.com/truenas-community-sysexts/nvidia-mig-support/releases/download/my-custom-release/nvidia.raw
+  https://github.com/truenas-community-sysexts/nvidia-mig-support/releases/download/<tag>/nvidia.raw
 
-# Hand it to install-nvidia-sysext.sh
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-nvidia-sysext.sh \
-  | sudo bash -s -- --sysext=/tmp/nvidia.raw
+# Hand it to install-sysext.sh --with-driver
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh \
+  | sudo bash -s -- --with-driver --driver-sysext=/tmp/nvidia.raw
 ```
 
-`--sysext=PATH` skips the default release-API resolution and uses the file you provide. `--release=TAG` pins to a specific tag (e.g. `v25.10.3.1-nvidia580.126.18-r10`) instead of the auto-detected latest. See `install-nvidia-sysext.sh --help` for the full flag list, plus `--check` (read-only probe) and `--dry-run` (validate without mutating).
+`--driver-sysext=PATH` skips the default release-API resolution for `nvidia.raw`; `--sysext=PATH` does the same for `nvidia-mig.raw`. `--release=TAG` pins both to a specific tag (e.g. `v25.10.3.1-nvidia580.126.18-r10`) instead of the auto-detected latest. See `install-sysext.sh --help` for the full flag list, plus `--check` (read-only probe) and `--dry-run` (validate without mutating).
 
 ## Boot-time activation: TrueNAS PREINIT
 
@@ -159,17 +161,20 @@ The working pattern is TrueNAS's middleware-driven PREINIT mechanism:
                        │
             ┌──────────┴───────────┐
             ▼                      ▼
-   lightweight path        full-driver path
+       default path          --with-driver path
             │                      │
-   "systemctl start         /mnt/<pool>/.config/nvidia-gpu/
-    nvidia-mig-setup.        nvidia-preinit-full.sh
-    service"                 │
-                             ├─ compare SHA of live nvidia.raw
-                             │  vs persistent custom
-                             ├─ if differ (e.g. after TrueNAS update):
-                             │    unmerge → zfs writable → cp → readonly
-                             │    → ensure symlink → merge
-                             └─ systemctl start nvidia-mig-setup.service
+   "systemctl start         nvidia-preinit-driver.sh
+    nvidia-mig-setup.        ├─ compare SHA of live nvidia.raw
+    service"                 │  vs persistent custom
+            │                ├─ if differ (TrueNAS update):
+            │                │    unmerge → zfs writable → cp →
+            │                │    readonly → ensure symlink → merge
+            │                └─ log any kernel-version mismatch
+            │                      +
+            │                "systemctl start nvidia-mig-setup.service"
+            │                (two independent entries; order doesn't
+            │                 matter — mig-setup polls for the driver
+            │                 to become responsive)
                        │
                        ▼
               docker.service starts
@@ -185,10 +190,10 @@ Everything that must survive a TrueNAS update lives under `/mnt/<pool>/.config/n
 | File | Purpose |
 | --- | --- |
 | `nvidia-original.raw` | Stock TrueNAS `nvidia.raw` backup. Used by `uninstall-nvidia-sysext.sh` and `recover-stock-nvidia.sh`. |
-| `nvidia.raw` | Custom driver sysext (full-driver path only). Re-applied by `nvidia-preinit-full.sh` after `/usr` is wiped by a TrueNAS update. |
-| `nvidia-mig.raw` | Lightweight sysext (lightweight path only). Symlinked from `/etc/extensions/`. |
+| `nvidia.raw` | Custom driver sysext (`--with-driver` only). Re-applied by `nvidia-preinit-driver.sh` after `/usr` is wiped by a TrueNAS update. |
+| `nvidia-mig.raw` | MIG sysext (always installed). Symlinked from `/etc/extensions/`. |
 | `mig.conf` | `MIG_PROFILES=14,14,14,14` style config read by `nvidia-mig-setup`. |
-| `nvidia-preinit-full.sh` | Full-driver PREINIT script. Registered via `midclt` so survives DB updates too. |
+| `nvidia-preinit-driver.sh` | Driver-side PREINIT script (`--with-driver` only). Registered via `midclt` so survives DB updates too. |
 
 ## Why ZFS readonly matters
 
