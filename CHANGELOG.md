@@ -2,6 +2,18 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## configure-mig: explicit `app.stop` before MIG create + diagnostic abort on stuck GPU
+
+Hardware-test finding (issue #47). A first run of `configure-mig` against a host with running GPU apps (Frigate, Ollama, etc.) ended with a misleading `ERROR: 'nvidia-smi mig -lgi' returned no GPU instances. Check journalctl…` after `Waiting for 6 GPU process(es)... 120s/120s`. Journal showed the real cause: `nvidia-smi mig -cgi` failing with `In use by another client` because containers with open CUDA/NVENC contexts kept holding the GPU past the wait window.
+
+Same root cause as the uninstall-script fix one entry below: the global `docker.update '{"nvidia": false}'` toggle doesn't kill running containers — it only reconfigures the docker runtime for future starts. `configure-mig` was relying on this toggle alone where the uninstall path already does the right thing (per-app `app.stop -j` first, toggle as belt-and-suspenders).
+
+Three changes:
+
+1. **Per-app `app.stop -j` before the toggle.** Walk `app.query`, fetch each `app.config`, filter for any with `nvidia_gpu_selection.<slot>.uuid` set (broader than uninstall's MIG-only filter — on first run, apps are bound to the full-GPU UUID, not MIG-* UUIDs). Stop each one in RUNNING state. `-j` blocks on actual container teardown so CUDA/NVENC contexts release.
+2. **Abort on stuck GPU instead of falling through.** The 120s drain wait is now 30s (sufficient post-`app.stop`) and on timeout the script dumps the stuck `pid,process_name,used_memory` rows, re-enables the docker toggle so non-GPU apps can come back, and exits non-zero. The previous "give up and try anyway" path always produced a misleading post-check failure.
+3. **Surface the real service error inline.** When the `mig -lgi` post-check finds zero instances, tail the last 20 lines of `journalctl -u nvidia-mig-setup` so the actual cause (`In use by another client`, kernel-module issue, etc.) is right there in the error output instead of requiring a separate journalctl invocation.
+
 ## configure-mig: race condition in app-picker enumeration
 
 Hardware-test finding: `sudo configure-mig` would intermittently show an empty `--- Apps ---` section in the device-to-app assignment picker even though `App services ready (6 apps)` had just printed seconds earlier. Re-running the script a minute later produced the full list.
