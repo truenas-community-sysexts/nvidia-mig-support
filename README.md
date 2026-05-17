@@ -1,8 +1,12 @@
-# TrueNAS NVIDIA MIG for Blackwell
+# TrueNAS Scale NVIDIA MIG for Blackwell
 
 NVIDIA MIG (Multi-Instance GPU) tooling for TrueNAS SCALE hosts running an **RTX PRO 6000 Blackwell**. One sysext for the MIG glue, one optional sysext that swaps the NVIDIA driver, and a single install script that handles both.
 
-## tl;dr
+If you don't know what Nvidia MIG is you then you don't need this sysext (MIGs allow partitionin he GPU into multiple instances.  It is not vGPU it can only be used with containers. This release only supports TrueNas apps (docker) service.
+
+## Getting Started 
+
+Default behaviour is to add mig suport to the existing shipped driver on 25.10 or later.
 
 ```bash
 # On TrueNAS, as root:
@@ -11,9 +15,8 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mi
 sudo configure-mig
 ```
 
-That's the default path — adds MIG tooling alongside TrueNAS's stock NVIDIA driver. No reboot, no driver replacement. Stops working only if TrueNAS's stock driver doesn't support MIG on your GPU (570.x+ on Blackwell does — confirmed on RTX PRO 6000).
 
-If you need to replace the nvidia stock driver with the one from the latest release of this sysext, add `--with-driver`:
+If you need to replace the nvidia stock driver with the newest one from the latest release of this sysext, add `--with-driver`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
