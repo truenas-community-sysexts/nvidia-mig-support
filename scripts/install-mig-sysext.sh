@@ -3,8 +3,8 @@
 #
 # Two install variants, one script:
 #
-#   sudo ./install-sysext.sh                          # default: MIG only
-#   sudo ./install-sysext.sh --with-driver            # custom driver + MIG
+#   sudo ./install-mig-sysext.sh                          # default: MIG only
+#   sudo ./install-mig-sysext.sh --with-driver            # custom driver + MIG
 #
 # Default mode:
 #   - Downloads nvidia-mig.raw (lightweight MIG sysext) from the latest
@@ -28,16 +28,16 @@
 # to walk through without mutating anything.
 #
 # Usage:
-#   sudo ./install-sysext.sh                              # MIG only
-#   sudo ./install-sysext.sh --with-driver                # driver + MIG
-#   sudo ./install-sysext.sh --check                      # status probe
-#   sudo ./install-sysext.sh --dry-run                    # validate, skip mutations
-#   sudo ./install-sysext.sh --release=v25.10.3.1-nvidia580.126.18-r5
-#   sudo ./install-sysext.sh --sysext=/tmp/nvidia-mig.raw # local MIG sysext
-#   sudo ./install-sysext.sh --with-driver \
+#   sudo ./install-mig-sysext.sh                              # MIG only
+#   sudo ./install-mig-sysext.sh --with-driver                # driver + MIG
+#   sudo ./install-mig-sysext.sh --check                      # status probe
+#   sudo ./install-mig-sysext.sh --dry-run                    # validate, skip mutations
+#   sudo ./install-mig-sysext.sh --release=v25.10.3.1-nvidia580.126.18-r5
+#   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw # local MIG sysext
+#   sudo ./install-mig-sysext.sh --with-driver \
 #       --driver-sysext=/tmp/nvidia.raw \
 #       --sysext=/tmp/nvidia-mig.raw                       # both local
-#   sudo ./install-sysext.sh --pool=fast
+#   sudo ./install-mig-sysext.sh --pool=fast
 #
 # Flags:
 #   --with-driver         Also install the custom-driver nvidia.raw
@@ -205,7 +205,7 @@ print(matches[0]['tag_name'], end='')
 [ "$(id -u 2>/dev/null)" = "0" ] || { echo "ERROR: must run as root" >&2; exit 1; }
 
 # --- Resolve persistent storage location ---
-# resolve_persist_dir is duplicated verbatim across install-sysext.sh,
+# resolve_persist_dir is duplicated verbatim across install-mig-sysext.sh,
 # configure-mig.sh, and recover-stock-nvidia.sh. Inline (rather than sourced
 # from a sibling file) so each script remains a self-contained curl|bash
 # artifact. Keep these copies in sync when changing the function.
@@ -307,7 +307,7 @@ do_check() {
         driver_installed=true
     fi
 
-    echo "=== install-sysext status ==="
+    echo "=== install-mig-sysext status ==="
     if $driver_installed; then
         echo "Mode detected: --with-driver (custom driver + MIG)"
     else
@@ -380,7 +380,7 @@ do_check() {
         record_pass "MIG sysext present at ${PERSIST_DIR}/nvidia-mig.raw"
     elif [ -n "${PERSIST_DIR:-}" ]; then
         record_fail "MIG sysext missing at ${PERSIST_DIR}/nvidia-mig.raw" \
-            "re-run install-sysext.sh"
+            "re-run install-mig-sysext.sh"
     fi
 
     # /etc/extensions/ symlink for MIG
@@ -525,7 +525,7 @@ except Exception:
             record_pass "Custom-driver backup ${PERSIST_DIR}/nvidia.raw present"
         elif [ -n "${PERSIST_DIR:-}" ]; then
             record_fail "Custom-driver backup ${PERSIST_DIR}/nvidia.raw missing" \
-                "re-run install-sysext.sh --with-driver"
+                "re-run install-mig-sysext.sh --with-driver"
         fi
 
         # PREINIT helper staged
@@ -533,10 +533,10 @@ except Exception:
             record_pass "PREINIT helper ${PERSIST_DIR}/nvidia-preinit-driver.sh staged and executable"
         elif [ -n "${PERSIST_DIR:-}" ] && [ -x "${PERSIST_DIR}/nvidia-preinit-full.sh" ]; then
             record_warn "Legacy PREINIT helper ${PERSIST_DIR}/nvidia-preinit-full.sh present (pre-rename)" \
-                "re-run install-sysext.sh --with-driver to upgrade to nvidia-preinit-driver.sh"
+                "re-run install-mig-sysext.sh --with-driver to upgrade to nvidia-preinit-driver.sh"
         elif [ -n "${PERSIST_DIR:-}" ]; then
             record_fail "PREINIT helper missing in ${PERSIST_DIR}" \
-                "re-run install-sysext.sh --with-driver"
+                "re-run install-mig-sysext.sh --with-driver"
         fi
     fi
 

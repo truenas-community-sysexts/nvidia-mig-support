@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Configure MIG layout + map MIG devices to TrueNAS apps.
 #
-# Runs after install-sysext.sh (default path: no reboot) or after the
-# reboot following install-sysext.sh --with-driver. Either path is fine —
+# Runs after install-mig-sysext.sh (default path: no reboot) or after the
+# reboot following install-mig-sysext.sh --with-driver. Either path is fine —
 # by the time configure-mig.sh runs, /usr/bin/nvidia-smi must work and
 # middleware must be up.
 #
@@ -201,7 +201,7 @@ profile_label() {
 }
 
 # --- Resolve persistent dir ---
-# resolve_persist_dir is duplicated verbatim across install-sysext.sh,
+# resolve_persist_dir is duplicated verbatim across install-mig-sysext.sh,
 # configure-mig.sh, and recover-stock-nvidia.sh. Inline (rather than
 # sourced from a sibling file) so each script remains a self-contained
 # curl|bash artifact. Keep these copies in sync when changing the function.
@@ -303,7 +303,7 @@ else
     if echo "$NVIDIA_ERR" | grep -qi "version mismatch"; then
         echo "" >&2
         echo "ERROR: kernel modules and userspace libraries are different driver versions." >&2
-        echo "       This is expected immediately after 'install-sysext.sh --with-driver'" >&2
+        echo "       This is expected immediately after 'install-mig-sysext.sh --with-driver'" >&2
         echo "       and resolves itself after a reboot loads matching kernel modules." >&2
         echo "" >&2
         echo "       Reboot first, then re-run configure-mig:" >&2

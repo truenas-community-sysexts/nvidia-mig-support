@@ -257,7 +257,6 @@ jobs:
           echo "=== smoke-test: required paths ==="
           require_file "usr/lib/extension-release.d/extension-release.nvidia"
           require_elf  "usr/bin/nvidia-smi"
-          require_file "usr/bin/uninstall-nvidia-driver"
 
           # Versioned ELF .so files come pre-built from the NVIDIA .run.
           for lib in libnvidia-ml libcuda; do
@@ -271,10 +270,15 @@ jobs:
             fi
           done
 
-          echo "=== smoke-test: MIG bits MUST NOT be in driver-only nvidia.raw ==="
+          echo "=== smoke-test: MIG / uninstaller bits MUST NOT be in driver-only nvidia.raw ==="
+          # Both `nvidia-mig.raw` and `nvidia.raw` get merged when --with-driver
+          # is installed; any /usr path that lives in both will fail the
+          # systemd-sysext merge. Keep nvidia.raw strictly driver-only.
           deny_file "usr/bin/nvidia-mig-setup"
           deny_file "usr/bin/configure-mig"
           deny_file "usr/lib/systemd/system/nvidia-mig-setup.service"
+          deny_file "usr/bin/uninstall-nvidia-mig"
+          deny_file "usr/bin/uninstall-nvidia-driver"
 
           # Kernel module + vermagic consistency.
           KVER_DIRS=$(cd "${SMOKE_TMP}/extract" && \
@@ -425,17 +429,17 @@ jobs:
 
           The install script picks the right asset based on the flag you pass:
 
-          - \`install-sysext.sh\` (default) → installs \`nvidia-mig.raw\` on top of TrueNAS's stock driver. No reboot.
-          - \`install-sysext.sh --with-driver\` → installs \`nvidia.raw\` (driver swap, requires reboot) **and** \`nvidia-mig.raw\` (MIG tooling). Use when the stock TrueNAS driver doesn't meet your hardware's needs.
+          - \`install-mig-sysext.sh\` (default) → installs \`nvidia-mig.raw\` on top of TrueNAS's stock driver. No reboot.
+          - \`install-mig-sysext.sh --with-driver\` → installs \`nvidia.raw\` (driver swap, requires reboot) **and** \`nvidia-mig.raw\` (MIG tooling). Use when the stock TrueNAS driver doesn't meet your hardware's needs.
 
           - Driver:        \`${NVIDIA_VERSION}\` (${KERNEL_MODULE_TYPE} module)
           - TrueNAS:       \`${TRUENAS_VERSION}\`
           - Run number:    ${RUN_NUMBER}
           - Source commit: \`${COMMIT_SHA}\`
 
-          Install: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-sysext.sh | sudo bash\`
+          Install: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash\`
 
-          With custom driver: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-sysext.sh | sudo bash -s -- --with-driver\`
+          With custom driver: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash -s -- --with-driver\`
           EOF
 
       - name: Publish release
@@ -521,7 +525,7 @@ jobs:
                 ``,
                 `### Variant A — default install (MIG on stock driver)`,
                 `- [ ] Pre-flight: host has stock NVIDIA driver merged (>= 570).`,
-                `- [ ] \`sudo bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/main/scripts/install-sysext.sh)" -- --release=${tag}\``,
+                `- [ ] \`sudo bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/main/scripts/install-mig-sysext.sh)" -- --release=${tag}\``,
                 `- [ ] No reboot needed; \`systemd-sysext\` merges nvidia-mig live.`,
                 `- [ ] \`systemd-sysext status\` shows both \`nvidia\` (stock) and \`nvidia-mig\` merged.`,
                 `- [ ] \`configure-mig\` runs to completion and creates MIG instances.`,
@@ -530,7 +534,7 @@ jobs:
                 ``,
                 `### Variant B — --with-driver install (custom driver + MIG)`,
                 `- [ ] Pre-flight: stock-nvidia backup exists (\`/mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw\`); run \`recover-stock-nvidia.sh\` if not.`,
-                `- [ ] \`sudo bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/main/scripts/install-sysext.sh)" -- --release=${tag} --with-driver\``,
+                `- [ ] \`sudo bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/main/scripts/install-mig-sysext.sh)" -- --release=${tag} --with-driver\``,
                 `- [ ] Reboot when the install script prompts.`,
                 `- [ ] \`nvidia-smi\` reports the new driver version with no NVML mismatch errors.`,
                 `- [ ] \`systemd-sysext status\` shows \`nvidia\` (custom) and \`nvidia-mig\` merged.`,
