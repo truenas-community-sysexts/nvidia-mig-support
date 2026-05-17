@@ -448,6 +448,30 @@ echo "Re-merging sysext..."
 systemd-sysext merge
 systemctl daemon-reload
 
+# Restore the nvidia toggle if we turned it off above to evict containers
+# before the driver swap. Hardware testing confirmed the toggle DOES
+# persist across reboot — earlier comments in this file claimed it gets
+# reset, but that turned out to be a misattribution: it was THIS script
+# leaving it false pre-reboot, and the value survived the reboot. Without
+# this restore the user gets a clean revert to stock driver but apps come
+# back with the nvidia toggle stuck off and no GPU access until they
+# notice and flip it manually.
+if $HAS_DRIVER; then
+    echo "Restoring nvidia toggle..."
+    midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+    NV_STATE=$(midclt call docker.config 2>/dev/null | python3 -c "
+import sys, json
+try: print(json.load(sys.stdin).get('nvidia'))
+except Exception: print('')" 2>/dev/null || true)
+    if [ "$NV_STATE" = "True" ]; then
+        echo "  docker.config.nvidia=True (restored)"
+    else
+        echo "  WARN: docker.config.nvidia=${NV_STATE:-?} after restore attempt." >&2
+        echo "        Re-enable manually after reboot:" >&2
+        echo "          sudo midclt call docker.update '{\"nvidia\": true}'" >&2
+    fi
+fi
+
 # ─────────────────────────────────────────────────────────────────────────
 # Deregister PREINIT entries — matched independently so we only touch what
 # we actually installed.
@@ -523,13 +547,11 @@ echo ""
 echo "=== Verification ==="
 systemd-sysext status || true
 
-# NOTE: we intentionally do NOT attempt to re-enable docker.config.nvidia
-# here. TrueNAS resets it during boot and silently rejects re-enable for
-# the first ~5–10 min while the docker subsystem initializes. So any
-# pre-reboot set is futile in the driver-revert case (gets reset by
-# the upcoming reboot); we surface the post-reboot instructions
-# explicitly instead. See scripts/install-mig-sysext.sh for the long
-# comment explaining the boot-window behavior.
+# NOTE: docker.config.nvidia is restored above (right after the sysext
+# re-merge) in the HAS_DRIVER path. Earlier revisions left this to the
+# user post-reboot, on the assumption that TrueNAS resets the toggle on
+# boot anyway — hardware testing showed the toggle actually persists,
+# so the restore is both safe and necessary.
 
 if $HAS_DRIVER; then
     cat <<EOF
@@ -542,23 +564,11 @@ userspace libs (no more NVML mismatch).
 
 Run: sudo reboot
 
->>> AFTER REBOOT — give it 5–10 minutes before flipping the Apps toggle <<<
+>>> AFTER REBOOT <<<
 
-TrueNAS resets the Apps' NVIDIA toggle to OFF during boot and silently
-rejects re-enable attempts for the first ~5–10 minutes while the docker
-subsystem initializes. App services were turned off during uninstall so
-this state continues until you re-enable.
-
-Once the box has been up for ~10 minutes, re-enable the toggle:
-
-  sudo midclt call docker.update '{"nvidia": true}'
-
-  -- or --
-
-  Toggle the "Use NVIDIA GPU" switch on under TrueNAS UI →
-  Apps → Settings → 'Use NVIDIA GPU' → Save
-
-Verify it stuck (should print "nvidia = True"):
+The nvidia toggle was restored to ON above and the value persists across
+reboot, so apps come back with GPU access automatically. If you want to
+verify after the reboot:
 
   sudo midclt call docker.config | python3 -c "import sys,json; print('nvidia =', json.load(sys.stdin).get('nvidia'))"
 EOF

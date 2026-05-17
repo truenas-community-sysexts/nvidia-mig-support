@@ -2,6 +2,16 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## nvidia toggle handling: uninstall now restores it, configure-mig waits post-boot
+
+Two related issues with the `docker.config.nvidia` toggle (TrueNAS UI: Apps → Settings → "Use NVIDIA GPU"), both surfaced after hardware testing PR #49.
+
+**Uninstall was leaving the toggle stuck OFF.** The `--with-driver` uninstall path calls `docker.update '{"nvidia": false}'` to evict nvidia-runtime containers before swapping the driver `.raw` out, and never restored it. Earlier comments justified skipping the restore with the claim that "TrueNAS resets the toggle on boot anyway." Hardware testing showed that claim was wrong: the toggle **persists** across reboot. The OFF state our uninstall wrote pre-reboot survived intact, and the user had to flip it back manually in the UI before apps regained GPU access. Fix: after the sysext re-merge in the `HAS_DRIVER` path, set `docker.update '{"nvidia": true}'` and verify the read-back. One-shot is sufficient here — the docker subsystem has been running continuously throughout uninstall, no service-startup race. The post-reboot banner now just suggests an optional verification one-liner.
+
+**configure-mig now waits for the toggle to accept writes before doing anything else.** Separate but related observation: immediately after a fresh boot, `docker.update '{"nvidia": true}'` returns success but the value doesn't actually persist for some time (read-back continues to show `False`). Empirically resolves within ~10 min; we don't know why. Running configure-mig inside that window let its final apps-re-enable silently no-op, leaving the toggle OFF and apps without GPU. Fix: at the start of configure-mig (right after the nvidia-smi preflight, before any state changes), poll `docker.update` → `docker.config` with a visible counter until the write sticks. Up to 10 min, then exit non-zero with a diagnostic and suggested actions. `nvidia=true` is the desired post-configure-mig state anyway, so leaving it set during the precheck is fine.
+
+Install and uninstall banners and surrounding comments rewritten to drop the speculative "TrueNAS resets on boot" framing. The accurate model is: the toggle persists across reboots, but the apps subsystem just doesn't process write requests for a window after a fresh boot.
+
 ## configure-mig: ignore stale UUIDs + cache original app state for restart
 
 Two follow-up bugs from the per-app-stop change one entry below, both surfaced on hardware test of release r16:
