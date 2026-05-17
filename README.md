@@ -13,7 +13,7 @@ sudo configure-mig
 
 That's the default path — adds MIG tooling alongside TrueNAS's stock NVIDIA driver. No reboot, no driver replacement. Stops working only if TrueNAS's stock driver doesn't support MIG on your GPU (570.x+ on Blackwell does — confirmed on RTX PRO 6000).
 
-If you need a different driver version than stock, add `--with-driver`:
+If you need to replace the nvidia stock driver with the one from the latest release of this sysext, add `--with-driver`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-sysext.sh \
