@@ -184,6 +184,8 @@ run_with_elapsed_capture() {
 profile_label() {
     # Engine counts straight from `nvidia-smi mig -lgip` on Blackwell.
     # "1 dec/enc/jpg" = 1 NVDEC + 1 NVENC + 1 NVJPG per instance.
+    # Indexed by profile ID (the number passed to `nvidia-smi mig -cgi`).
+    # Used in the cheat-sheet table printed during the interactive prompt.
     case "$1" in
         14) echo "1g.24gb           — 1 dec/enc/jpg, no OFA" ;;
         21) echo "1g.24gb+me        — 1 dec/enc/jpg + OFA" ;;
@@ -197,6 +199,28 @@ profile_label() {
         0)  echo "4g.96gb           — whole GPU: 4 dec/enc/jpg + OFA" ;;
         32) echo "4g.96gb+gfx       — whole GPU: 4 dec/enc/jpg + OFA + graphics" ;;
         *)  echo "profile $1" ;;
+    esac
+}
+
+profile_label_from_name() {
+    # Same labels as profile_label(), but indexed by the profile name
+    # that `nvidia-smi -L` prints alongside each MIG device. Used in the
+    # MIG device list during interactive assignment so the label always
+    # matches the UUID we hand to app.update — no assumption about index
+    # alignment between nvidia-smi -L output and mig.conf order.
+    case "$1" in
+        1g.24gb)        echo "1g.24gb           — 1 dec/enc/jpg, no OFA" ;;
+        1g.24gb+me)     echo "1g.24gb+me        — 1 dec/enc/jpg + OFA" ;;
+        1g.24gb+gfx)    echo "1g.24gb+gfx       — 1 dec/enc/jpg, no OFA, +graphics" ;;
+        1g.24gb+me.all) echo "1g.24gb+me.all    — ALL 4 dec/enc/jpg + OFA (claims them all)" ;;
+        1g.24gb-me)     echo "1g.24gb-me        — pure compute, no media, no OFA" ;;
+        2g.48gb)        echo "2g.48gb           — 2 dec/enc/jpg, no OFA" ;;
+        2g.48gb+gfx)    echo "2g.48gb+gfx       — 2 dec/enc/jpg, no OFA, +graphics" ;;
+        2g.48gb+me.all) echo "2g.48gb+me.all    — ALL 4 dec/enc/jpg + OFA (claims them all)" ;;
+        2g.48gb-me)     echo "2g.48gb-me        — pure compute, no media, no OFA" ;;
+        4g.96gb)        echo "4g.96gb           — whole GPU: 4 dec/enc/jpg + OFA" ;;
+        4g.96gb+gfx)    echo "4g.96gb+gfx       — whole GPU: 4 dec/enc/jpg + OFA + graphics" ;;
+        *)              echo "$1" ;;
     esac
 }
 
@@ -450,8 +474,39 @@ done
 [ "${attempt:-0}" -eq 18 ] && echo ""
 
 # --- Enumerate created MIG instances ---
-mapfile -t MIG_UUIDS < <(/usr/bin/nvidia-smi -L 2>/dev/null \
-    | grep 'MIG' | sed -n 's/.*UUID: \(MIG-[^)]*\)).*/\1/p')
+#
+# Parse `nvidia-smi -L`'s MIG device lines. Each line looks like:
+#
+#     "  MIG 2g.48gb+gfx     Device  0: (UUID: MIG-f54d3804-...)"
+#
+# We extract BOTH the profile name AND the UUID per line and store them
+# parallel-indexed. Earlier revisions of this script took only the UUIDs
+# and then paired them with the profile-ID list from mig.conf by array
+# index, assuming `nvidia-smi -L` returns devices in mig.conf creation
+# order. That assumption is wrong: the NVIDIA driver assigns GPU
+# Instance IDs based on slice-placement constraints, and `nvidia-smi -L`
+# lists MIG devices in GI-ID order — not creation order. With profiles
+# of different slice counts (e.g. 21,35,47 where 35 needs 2 slices),
+# GI IDs end up shuffled relative to mig.conf order, the index-pairing
+# mislabels every device, and the user's "device 1 = 1g.24gb+me" pick
+# actually pinned their container to whatever-the-first-GI-actually-is
+# (often the 2g slice). Verified on RTX PRO 6000 Blackwell with
+# profiles 21,35,47 producing GIs 3,2,4 in that creation order.
+#
+# Reading the profile name straight from nvidia-smi's output makes the
+# labels match the UUIDs always, regardless of GI assignment order.
+MIG_DEVICE_PROFILES=()
+MIG_UUIDS=()
+while IFS= read -r line; do
+    # Robust to extra whitespace; tolerant of name characters used in
+    # Blackwell profiles: digits, letters, dots, plus signs, hyphens.
+    profile=$(printf '%s' "$line" | sed -nE 's/.*MIG[[:space:]]+([0-9A-Za-z.+\-]+).*Device[[:space:]]+[0-9]+.*/\1/p')
+    uuid=$(printf '%s' "$line" | sed -nE 's/.*\(UUID:[[:space:]]*(MIG-[^)]+)\).*/\1/p')
+    if [ -n "$profile" ] && [ -n "$uuid" ]; then
+        MIG_DEVICE_PROFILES+=("$profile")
+        MIG_UUIDS+=("$uuid")
+    fi
+done < <(/usr/bin/nvidia-smi -L 2>/dev/null | grep -E '^[[:space:]]+MIG[[:space:]]')
 
 if [ "${#MIG_UUIDS[@]}" -eq 0 ]; then
     echo "ERROR: no MIG UUIDs found after instance creation. Check journalctl -u nvidia-mig-setup." >&2
@@ -461,13 +516,14 @@ echo "MIG devices created: ${#MIG_UUIDS[@]}"
 
 IFS=',' read -ra PROFILE_ARRAY <<< "$MIG_PROFILES"
 
-# Sanity check: profile list and MIG instance count must match exactly.
-# Otherwise the service didn't re-run with the new mig.conf (e.g. start
-# vs. restart bug), or someone hand-modified instances outside the
-# service. Either way, the assignment labels will be wrong — bail out.
+# Sanity check: mig.conf profile count must match actual MIG instance
+# count. We no longer index PROFILE_ARRAY for device LABELS (those come
+# straight from nvidia-smi -L now), but a count mismatch still indicates
+# something went wrong — service didn't re-run with the new mig.conf,
+# or someone created/destroyed instances outside the service.
 if [ "${#PROFILE_ARRAY[@]}" -ne "${#MIG_UUIDS[@]}" ]; then
     echo "" >&2
-    echo "ERROR: profile list has ${#PROFILE_ARRAY[@]} entries (${MIG_PROFILES})" >&2
+    echo "ERROR: mig.conf has ${#PROFILE_ARRAY[@]} entries (${MIG_PROFILES})" >&2
     echo "       but the GPU has ${#MIG_UUIDS[@]} MIG instance(s) right now." >&2
     echo "       Counts must match. Likely causes:" >&2
     echo "         - nvidia-mig-setup.service didn't re-run with the new mig.conf" >&2
@@ -482,7 +538,7 @@ if $SKIP_APP_MAPPING || [ "${APP_COUNT:-0}" -eq 0 ]; then
     echo "=== MIG Devices ==="
     for i in "${!MIG_UUIDS[@]}"; do
         printf "  [%d] %s\n        %s\n" \
-            "$((i+1))" "$(profile_label "${PROFILE_ARRAY[$i]:-unknown}")" "${MIG_UUIDS[$i]}"
+            "$((i+1))" "$(profile_label_from_name "${MIG_DEVICE_PROFILES[$i]}")" "${MIG_UUIDS[$i]}"
     done
     echo ""
     echo "Skipping app↔MIG mapping (no apps found or --skip-app-mapping given)."
@@ -523,7 +579,7 @@ while true; do
     echo ""
     echo "--- MIG Devices ---"
     for i in "${!MIG_UUIDS[@]}"; do
-        dtype=$(profile_label "${PROFILE_ARRAY[$i]:-unknown}")
+        dtype=$(profile_label_from_name "${MIG_DEVICE_PROFILES[$i]}")
         assigned_to=""
         for j in "${!STAGED_UUID[@]}"; do
             if [ "${STAGED_UUID[$j]}" = "${MIG_UUIDS[$i]}" ]; then
@@ -553,7 +609,7 @@ while true; do
     fi
 
     sel_uuid="${MIG_UUIDS[$dev_idx]}"
-    sel_dtype=$(profile_label "${PROFILE_ARRAY[$dev_idx]:-unknown}")
+    sel_dtype=$(profile_label_from_name "${MIG_DEVICE_PROFILES[$dev_idx]}")
 
     echo ""
     echo "--- Apps ---"
