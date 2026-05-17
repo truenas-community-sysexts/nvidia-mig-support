@@ -553,7 +553,7 @@ Try the call until it sticks:
   sudo midclt call docker.update '{"nvidia": true}'
   sudo midclt call docker.config | python3 -c "import sys,json; print('nvidia =', json.load(sys.stdin).get('nvidia'))"
 
-If that prints `nvidia = False`, wait a minute and try again. Same flow
+If that prints 'nvidia = False', wait a minute and try again. Same flow
 in the UI: Apps → Settings → 'Use NVIDIA GPU' → Save (and verify by
 toggling away and back).
 EOF
