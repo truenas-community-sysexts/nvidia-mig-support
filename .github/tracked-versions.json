@@ -4,7 +4,7 @@
     "train": "Goldeye"
   },
   "nvidia": {
-    "driver": "595.58.03",
+    "driver": "595.71.05",
     "kernel_module_type": "open"
   }
 }
