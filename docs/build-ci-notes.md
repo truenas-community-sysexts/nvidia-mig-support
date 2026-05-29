@@ -61,7 +61,7 @@ Tag schema choices worth noting:
 
 - **One tag, two assets.** Earlier iterations of this repo produced separate `v<truenas>-mig-r<run>` releases for the lightweight path; the model changed when we collapsed onto a single install script (`install-mig-sysext.sh`) with a `--with-driver` flag. One release carrying both assets lines up with one install operation per host.
 - **NVIDIA-only bumps still rebuild `nvidia-mig.raw`.** The MIG asset is TrueNAS-version-parameterized for tag/context only — its content doesn't depend on the NVIDIA driver version. On NVIDIA-only `check-releases` bumps we still rebuild it and attach it to the new tag; content is byte-equivalent to the previous build at this TrueNAS version. We accept that small inefficiency to keep the release model simple (no conditional asset attachment).
-- **No commit SHA in the tag.** Tags would get ugly (`v25.10.3.1-nvidia595.58.03-abc1234-r12345`) and run_number already provides uniqueness. The commit SHA is recorded in the release notes.
+- **No commit SHA in the tag.** Tags would get ugly (`v25.10.3.1-nvidia595.71.05-abc1234-r12345`) and run_number already provides uniqueness. The commit SHA is recorded in the release notes.
 - **No `push: main` trigger on the build workflow.** Push-triggered builds are what produced the `dev-*` tag-burn failure on earlier iterations. Builds now only happen on intentional triggers (manual dispatch, check-releases auto-bumps) — same model as hailo.
 
 ## Why a separate `resolve` job
