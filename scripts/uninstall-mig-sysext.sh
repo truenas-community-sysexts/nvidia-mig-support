@@ -52,6 +52,27 @@ done
 
 [ "$(id -u 2>/dev/null)" = "0" ] || { echo "ERROR: must run as root" >&2; exit 1; }
 
+# Track mutations so the trap can undo them if we die mid-revert (failure
+# under set -e, or a SIGTERM/SIGINT). Without this, an abort between
+# readonly=off and readonly=on leaves /usr writable until reboot, and an abort
+# after the docker toggle (disabled below to evict GPU containers) leaves
+# nvidia stuck off, both until manually fixed.
+USR_WAS_WRITABLE=0
+USR_DATASET=""
+DOCKER_NVIDIA_DISABLED=0
+
+restore_state() {
+    if [ "$USR_WAS_WRITABLE" = "1" ] && [ -n "$USR_DATASET" ]; then
+        zfs set readonly=on "$USR_DATASET" 2>/dev/null || true
+        USR_WAS_WRITABLE=0
+    fi
+    if [ "$DOCKER_NVIDIA_DISABLED" = "1" ]; then
+        midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+        DOCKER_NVIDIA_DISABLED=0
+    fi
+}
+trap restore_state EXIT INT TERM
+
 SYSEXT_DIR="/usr/share/truenas/sysext-extensions"
 LIVE_NVIDIA="${SYSEXT_DIR}/nvidia.raw"
 
@@ -396,6 +417,7 @@ if $HAS_DRIVER; then
     echo "Stopping app services..."
     midclt call -j docker.update '{"nvidia": false}' >/dev/null \
         || echo "WARN: app services API call (docker.update) failed — continuing"
+    DOCKER_NVIDIA_DISABLED=1
     if [ -x /usr/bin/nvidia-smi ]; then
         printf "  Waiting for GPU to be released... 0s/120s"
         for attempt in $(seq 1 24); do
@@ -424,10 +446,16 @@ if $HAS_DRIVER; then
     if [ -n "$ORIGINAL" ]; then
         echo "Restoring stock nvidia.raw from $ORIGINAL"
         USR_DATASET=$(zfs list -H -o name /usr 2>/dev/null)
+        if [ -z "$USR_DATASET" ]; then
+            echo "ERROR: could not determine the ZFS dataset for /usr" >&2
+            exit 1
+        fi
         zfs set readonly=off "$USR_DATASET"
+        USR_WAS_WRITABLE=1
         cp "$ORIGINAL" "$LIVE_NVIDIA"
         [ -f "${LIVE_NVIDIA}.bak" ] && rm -f "${LIVE_NVIDIA}.bak" 2>/dev/null || true
         zfs set readonly=on "$USR_DATASET"
+        USR_WAS_WRITABLE=0
         mkdir -p /etc/extensions
         ln -sf "$LIVE_NVIDIA" /etc/extensions/nvidia.raw
     else
@@ -459,6 +487,7 @@ systemctl daemon-reload
 if $HAS_DRIVER; then
     echo "Restoring nvidia toggle..."
     midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+    DOCKER_NVIDIA_DISABLED=0
     NV_STATE=$(midclt call docker.config 2>/dev/null | python3 -c "
 import sys, json
 try: print(json.load(sys.stdin).get('nvidia'))
