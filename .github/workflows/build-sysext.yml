@@ -405,7 +405,7 @@ jobs:
       # blocks the release. The artifact remains available via the workflow
       # run page for 30 days for human inspection.
       - name: Download nvidia-mig.raw artifact
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: nvidia-mig-raw
           path: dist
