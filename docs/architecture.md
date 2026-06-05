@@ -73,24 +73,32 @@ Adds MIG tooling on top of TrueNAS's stock NVIDIA driver. The stock `nvidia.raw`
 
 Built locally in <1 s via `mksquashfs`. See [docs/build-ci-notes.md](build-ci-notes.md#release-tagging-scheme) for the tag scheme.
 
-### `--with-driver` (`nvidia.raw` + `nvidia-mig.raw`)
+### `--with-driver` (`nvidia.raw` built on host + `nvidia-mig.raw` from release)
 
 Swaps the stock `nvidia.raw` for one containing a different driver version (e.g. 580.126.18 or 590.44.01), and installs the same `nvidia-mig.raw` from above on top.
 
 ```text
-       nvidia.raw (custom, driver-only, ~420 MB)
+       nvidia.raw (built on YOUR TrueNAS host, never on a release, ~420 MB)
             │
             ├─ NVIDIA driver (libs, .ko modules, nvidia-smi, …)
             └─ nvidia-container-toolkit
             +
        hailo.raw (untouched)
             +
-       nvidia-mig.raw (same as default path — MIG tooling lives here only,
-                       and so does the unified /usr/bin/uninstall-nvidia-mig
-                       which auto-detects MIG-only vs MIG+driver state)
+       nvidia-mig.raw (released as a MIT-licensed asset — MIG tooling lives
+                       here only, and so does the unified
+                       /usr/bin/uninstall-nvidia-mig which auto-detects
+                       MIG-only vs MIG+driver state)
 ```
 
-Built on an `ubuntu-24.04` GitHub Actions runner (no Docker) in ~8 min. Ports biohazardious/truenas-nvidia-driver-updater's `entrypoint.sh`:
+The `nvidia.raw` is **not** a release asset — see the [License section of the README](../README.md#license) for the NVIDIA-EULA-driven reasoning. The install script's `--with-driver` path invokes [scripts/build-on-host.sh](../scripts/build-on-host.sh) which runs [scripts/build-nvidia-sysext.sh](../scripts/build-nvidia-sysext.sh) inside a transient `ubuntu:24.04` docker container on the TrueNAS host:
+
+- First build: ~8 min (pull `ubuntu:24.04`, download TrueNAS `.update` ~1.5 GB, download NVIDIA `.run` ~400 MB, cross-compile, squashfs)
+- Subsequent rebuilds with warm cache: ~3 min (cache hits both downloads; only apt-installs + cross-compile re-run)
+- Cache lives at `/mnt/<pool>/.config/nvidia-gpu/cache/` and survives between rebuilds
+- Built `nvidia.raw` is cached at `/mnt/<pool>/.config/nvidia-gpu/nvidia.raw`; install script reuses it when driver version + running kernel both match (skip the build entirely; ~10 s). `--rebuild` forces fresh.
+
+The same build script also runs in CI (without docker, directly on `ubuntu-24.04`) as a smoke test: catches upstream breakage (NVIDIA changes the `.run` installer, kernel header path changes, etc.) before users hit it. Ports biohazardious/truenas-nvidia-driver-updater's `entrypoint.sh`:
 
 1. Download the official TrueNAS `.update` archive
 2. Peel the outer squashfs → `rootfs.squashfs` → extract `usr/src` + `usr/lib/modules`
@@ -108,7 +116,28 @@ Workflow dispatch input controls `nvidia_version`, `truenas_version`, `kernel_mo
 
 ## Building a custom nvidia.raw
 
-The daily `check-releases.yml` workflow watches `download.nvidia.com/.../latest.txt` and `truenas/scale-build` tags and fires `build-sysext.yml` automatically when either moves, producing a fresh `v<truenas>-nvidia<driver>-r<run>` release carrying both `nvidia.raw` (driver-only) and `nvidia-mig.raw`, marked `mark_latest=false` until a human hardware-verifies it (see [docs/build-ci-notes.md](build-ci-notes.md#auto-cadence-check-releasesyml)). If you want a different combination — older driver, proprietary kernel modules, a different TrueNAS version — trigger a parameterized build via `workflow_dispatch`:
+The daily `check-releases.yml` workflow watches `download.nvidia.com/.../latest.txt` and `truenas/scale-build` tags and fires `build-sysext.yml` automatically when either moves, producing a fresh `v<truenas>-nvidia<driver>-r<run>` release carrying `nvidia-mig.raw` (the driver-build step still runs as a smoke test but isn't published — see License section of the [README](../README.md#license)), marked `mark_latest=false` until a human hardware-verifies it (see [docs/build-ci-notes.md](build-ci-notes.md#auto-cadence-check-releasesyml)). If you want a different combination — older driver, proprietary kernel modules, a different TrueNAS version — there are two paths:
+
+### Build on your TrueNAS host (recommended)
+
+Pass `--custom-run=` or `--release=TAG` to the install script:
+
+```bash
+# Use a specific NVIDIA driver version not in the tracked releases:
+wget https://us.download.nvidia.com/XFree86/Linux-x86_64/590.44.01/NVIDIA-Linux-x86_64-590.44.01-no-compat32.run
+
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
+  | sudo bash -s -- --with-driver --custom-run=$PWD/NVIDIA-Linux-x86_64-590.44.01-no-compat32.run
+
+# Or pin to a specific tracked release tag:
+curl -fsSL .../scripts/install-mig-sysext.sh | sudo bash -s -- --with-driver --release=v25.10.3.1-nvidia580.126.18-r10
+```
+
+For kernel-module flavor: `--kmod=proprietary` (default is `open` to match what TrueNAS itself ships; proprietary needed for Maxwell/Pascal/Volta cards).
+
+### Run the CI smoke build with custom inputs
+
+`workflow_dispatch` on `build-sysext.yml` accepts the same parameters CI uses automatically. The build runs (catches upstream breakage early), but no `nvidia.raw` is published — only `nvidia-mig.raw`.
 
 ```bash
 gh workflow run build-sysext.yml \
@@ -123,20 +152,17 @@ Inputs:
 | --- | --- | --- |
 | `nvidia_version` | *(tracked)* | Any version published at `us.download.nvidia.com/XFree86/Linux-x86_64/` |
 | `truenas_version` | *(tracked)* | Used to download the official `.update` file for kernel-header extraction |
-| `kernel_module_type` | *(tracked)* | `open` recommended for Blackwell; `proprietary` for legacy GPUs |
+| `kernel_module_type` | *(tracked)* | `open` recommended for Turing+; `proprietary` for Maxwell/Pascal/Volta |
 | `train_name` | *(tracked)* | Auto-tracked from `.github/tracked-versions.json`; usually `Goldeye` for 25.x |
 | `mark_latest` | `true` | Set `false` to publish without promoting to GitHub "Latest" |
 
-Build runs on `ubuntu-24.04` in ~8 min. The workflow itself lives at [.github/workflows/build-sysext.yml](../.github/workflows/build-sysext.yml); the driver build logic in [scripts/build-nvidia-sysext.sh](../scripts/build-nvidia-sysext.sh) (a native-runner port of [biohazardious/truenas-nvidia-driver-updater](https://github.com/biohazardious/truenas-nvidia-driver-updater) — no Docker, no scale-build); the MIG build in [scripts/build-mig-sysext.sh](../scripts/build-mig-sysext.sh).
+CI build runs on `ubuntu-24.04` in ~8 min. The workflow lives at [.github/workflows/build-sysext.yml](../.github/workflows/build-sysext.yml); the driver build logic in [scripts/build-nvidia-sysext.sh](../scripts/build-nvidia-sysext.sh) (a native-runner port of [biohazardious/truenas-nvidia-driver-updater](https://github.com/biohazardious/truenas-nvidia-driver-updater) — runs identically in CI and inside the on-host `ubuntu:24.04` container); the MIG build in [scripts/build-mig-sysext.sh](../scripts/build-mig-sysext.sh); the on-host docker wrapper in [scripts/build-on-host.sh](../scripts/build-on-host.sh).
 
-Once built and attached to a release, install it from TrueNAS:
+### Install a pre-built nvidia.raw from elsewhere
+
+If you built `nvidia.raw` on another machine (or downloaded one from a third party), skip the on-host build:
 
 ```bash
-# Download the driver artifact from your custom release
-curl -fL -o /tmp/nvidia.raw \
-  https://github.com/truenas-community-sysexts/nvidia-mig-support/releases/download/<tag>/nvidia.raw
-
-# Hand it to install-mig-sysext.sh --with-driver
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash -s -- --with-driver --driver-sysext=/tmp/nvidia.raw
 ```

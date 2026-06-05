@@ -14,38 +14,59 @@
 #   - No reboot required.
 #
 # --with-driver mode:
-#   - Downloads BOTH nvidia.raw (driver-only) AND nvidia-mig.raw.
-#   - Swaps TrueNAS's stock nvidia.raw with the custom driver — requires
-#     `/usr` r/w briefly (zfs readonly toggle).
+#   - Builds nvidia.raw on this TrueNAS host inside a transient ubuntu:24.04
+#     docker container (NVIDIA's EULA prohibits us redistributing the
+#     proprietary userspace, so the artifact is never published on releases —
+#     it's assembled on your machine, where you accept NVIDIA's EULA when
+#     the .run installer runs with --silent).
+#   - Downloads nvidia-mig.raw (lightweight, ours, MIT-licensed) from the
+#     same v<truenas>-nvidia<driver>-r<run> release.
+#   - Swaps TrueNAS's stock nvidia.raw with the freshly built custom driver —
+#     requires `/usr` r/w briefly (zfs readonly toggle).
 #   - Installs nvidia-mig.raw alongside.
 #   - Registers TWO PREINIT entries (driver restore + MIG service start).
 #   - **Reboot required** — live-swapping the driver leaves stale kernel
 #     modules in memory; NVML reports driver/library version mismatch
 #     until you reboot.
+#   - Subsequent installs reuse the cached nvidia.raw if it matches the
+#     running kernel + target driver version (skip rebuild). Pass --rebuild
+#     to force.
 #
-# Override release with --release=TAG or pre-staged files with --sysext /
-# --driver-sysext. Use --check to probe an existing install or --dry-run
-# to walk through without mutating anything.
+# Override release with --release=TAG, pre-staged sysext with --sysext, or
+# pre-built driver with --driver-sysext. Use --check to probe an existing
+# install or --dry-run to walk through without mutating anything.
 #
 # Usage:
 #   sudo ./install-mig-sysext.sh                              # MIG only
-#   sudo ./install-mig-sysext.sh --with-driver                # driver + MIG
+#   sudo ./install-mig-sysext.sh --with-driver                # build + install driver + MIG
 #   sudo ./install-mig-sysext.sh --check                      # status probe
 #   sudo ./install-mig-sysext.sh --dry-run                    # validate, skip mutations
 #   sudo ./install-mig-sysext.sh --release=v25.10.3.1-nvidia580.126.18-r5
 #   sudo ./install-mig-sysext.sh --sysext=/tmp/nvidia-mig.raw # local MIG sysext
+#   sudo ./install-mig-sysext.sh --with-driver --rebuild      # ignore cached driver, rebuild
+#   sudo ./install-mig-sysext.sh --with-driver \
+#       --custom-run=/path/to/NVIDIA-Linux-x86_64-590.44.01-no-compat32.run
 #   sudo ./install-mig-sysext.sh --with-driver \
 #       --driver-sysext=/tmp/nvidia.raw \
-#       --sysext=/tmp/nvidia-mig.raw                       # both local
+#       --sysext=/tmp/nvidia-mig.raw                       # both local, no build
 #   sudo ./install-mig-sysext.sh --pool=fast
 #
 # Flags:
-#   --with-driver         Also install the custom-driver nvidia.raw
+#   --with-driver         Also build + install the custom-driver nvidia.raw
 #                         (default is MIG-only on top of stock driver)
 #   --sysext=PATH         Local nvidia-mig.raw (skips MIG download)
-#   --driver-sysext=PATH  Local nvidia.raw (only with --with-driver;
-#                         skips driver download)
-#   --release=TAG         Download from this exact release tag
+#   --driver-sysext=PATH  Local nvidia.raw (only with --with-driver; skips
+#                         the docker build — use for a .raw you built elsewhere)
+#   --custom-run=PATH     Local NVIDIA .run installer (only with --with-driver;
+#                         skips the NVIDIA download inside the build container)
+#   --rebuild             --with-driver only: ignore any cached nvidia.raw in
+#                         the persist dir and rebuild from scratch
+#   --kmod=open|proprietary
+#                         --with-driver only: kernel-module flavor (default
+#                         open — required for Turing+ to use the open path;
+#                         proprietary needed for Maxwell/Pascal/Volta cards)
+#   --release=TAG         Download nvidia-mig.raw from this exact release tag
+#                         (driver version is parsed from the tag for the build)
 #   --pool=NAME           ZFS pool for persistent storage
 #   --persist-path=PATH   Exact directory for persistent storage
 #   --force               Default mode: bypass the stock-driver-version
@@ -73,7 +94,6 @@ set -euo pipefail
 
 REPO="truenas-community-sysexts/nvidia-mig-support"
 TAG_PREFIX_SUFFIX="-nvidia"  # full prefix is v<truenas>-nvidia
-DRIVER_ASSET="nvidia.raw"
 MIG_ASSET="nvidia-mig.raw"
 SYSEXT_DIR="/usr/share/truenas/sysext-extensions"
 LIVE_NVIDIA="${SYSEXT_DIR}/nvidia.raw"
@@ -83,6 +103,9 @@ MIN_DRIVER_MAJOR=570
 WITH_DRIVER=false
 MIG_SRC=""
 DRIVER_SRC=""
+CUSTOM_RUN=""
+REBUILD=false
+KMOD_TYPE="open"
 RELEASE_TAG=""
 POOL_NAME=""
 PERSIST_PATH=""
@@ -96,6 +119,9 @@ for arg in "$@"; do
         --with-driver) WITH_DRIVER=true ;;
         --sysext=*) MIG_SRC="${arg#*=}" ;;
         --driver-sysext=*) DRIVER_SRC="${arg#*=}" ;;
+        --custom-run=*) CUSTOM_RUN="${arg#*=}" ;;
+        --rebuild) REBUILD=true ;;
+        --kmod=*) KMOD_TYPE="${arg#*=}" ;;
         --release=*) RELEASE_TAG="${arg#*=}" ;;
         --pool=*) POOL_NAME="${arg#*=}" ;;
         --persist-path=*) PERSIST_PATH="${arg#*=}" ;;
@@ -104,7 +130,7 @@ for arg in "$@"; do
         --check) CHECK_MODE=true ;;
         --dry-run) DRY_RUN=true ;;
         -h|--help)
-            sed -n '2,69p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,84p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
@@ -119,6 +145,24 @@ if [ -n "$DRIVER_SRC" ] && ! $WITH_DRIVER; then
     echo "ERROR: --driver-sysext requires --with-driver" >&2
     exit 2
 fi
+if [ -n "$CUSTOM_RUN" ] && ! $WITH_DRIVER; then
+    echo "ERROR: --custom-run requires --with-driver" >&2
+    exit 2
+fi
+if [ -n "$CUSTOM_RUN" ] && [ -n "$DRIVER_SRC" ]; then
+    echo "ERROR: --custom-run and --driver-sysext are mutually exclusive (--custom-run feeds the build; --driver-sysext skips the build)" >&2
+    exit 2
+fi
+if $REBUILD && ! $WITH_DRIVER; then
+    echo "WARN: --rebuild has no effect without --with-driver" >&2
+fi
+if $REBUILD && [ -n "$DRIVER_SRC" ]; then
+    echo "WARN: --rebuild has no effect when --driver-sysext is passed (no build is performed)" >&2
+fi
+case "$KMOD_TYPE" in
+    open|proprietary) ;;
+    *) echo "ERROR: --kmod must be 'open' or 'proprietary' (got: $KMOD_TYPE)" >&2; exit 2 ;;
+esac
 if $SKIP_BACKUP_CHECK && ! $WITH_DRIVER; then
     echo "WARN: --skip-backup-check has no effect without --with-driver (default mode never touches the stock driver)" >&2
 fi
@@ -126,12 +170,69 @@ fi
 # Run a command in real mode; print `[dry-run] would: …` in dry-run mode.
 # For redirections or compound shell logic, gate manually with
 # `if $DRY_RUN; then ... else ... fi`.
+#
+# The dry-run message goes to stderr so helpers whose stdout is captured
+# (e.g. `stage_dir=$(stage_build_helpers)`) don't end up with would-be
+# log lines bleeding into their return value.
 if_real() {
     if $DRY_RUN; then
-        printf '[dry-run] would: %s\n' "$*"
+        printf '[dry-run] would: %s\n' "$*" >&2
     else
         "$@"
     fi
+}
+
+# Live-elapsed wrapper for blocking midclt -j calls. Same pattern used in
+# configure-mig.sh and uninstall-mig-sysext.sh — spawns a background
+# ticker that prints "<label>... Ns" once a second, runs the command
+# with combined stdout/stderr captured, clears the line on return. Sets
+# ELAPSED and CAPTURED_OUT in caller scope.
+ELAPSED=0
+CAPTURED_OUT=""
+run_with_elapsed_capture() {
+    local label="$1"; shift
+    local start outfile ticker_pid rc
+    start=$(date +%s)
+    outfile=$(mktemp)
+    (
+        while sleep 1; do
+            printf "\r%s... %ds" "$label" "$(($(date +%s) - start))"
+        done
+    ) &
+    ticker_pid=$!
+    "$@" >"$outfile" 2>&1
+    rc=$?
+    kill "$ticker_pid" 2>/dev/null
+    wait "$ticker_pid" 2>/dev/null
+    ELAPSED=$(($(date +%s) - start))
+    CAPTURED_OUT=$(cat "$outfile")
+    rm -f "$outfile"
+    printf "\r%80s\r" ""
+    return $rc
+}
+
+# Detect the running TrueNAS version via midclt. Retries on transient
+# failures — observed: midclt sporadically returns nothing on the first
+# call after a `sudo` invocation, succeeds on retry within ~1s. The
+# pattern is reproducible enough that letting the script die on the
+# first miss is hostile UX. Echoes the version; returns 1 on persistent
+# failure.
+detect_truenas_version() {
+    local v i
+    for i in 1 2 3; do
+        v=$(midclt call system.info 2>/dev/null | python3 -c '
+import sys, json
+try:
+    print(json.load(sys.stdin)["version"])
+except Exception:
+    pass' 2>/dev/null) || true
+        if [ -n "$v" ]; then
+            printf '%s\n' "$v"
+            return 0
+        fi
+        [ "$i" -lt 3 ] && sleep 1
+    done
+    return 1
 }
 
 resolve_release_tag() {
@@ -145,16 +246,10 @@ resolve_release_tag() {
     fi
 
     local version
-    version=$(midclt call system.info 2>/dev/null | python3 -c '
-import sys, json
-try:
-    print(json.load(sys.stdin)["version"])
-except Exception:
-    pass' 2>/dev/null) || true
-    if [ -z "$version" ]; then
-        echo "ERROR: could not detect TrueNAS version (midclt call system.info failed)" >&2
+    version=$(detect_truenas_version) || {
+        echo "ERROR: could not detect TrueNAS version (midclt call system.info failed after 3 retries)" >&2
         exit 1
-    fi
+    }
     echo "Detected TrueNAS version: ${version}" >&2
 
     local prefix="v${version}${TAG_PREFIX_SUFFIX}"
@@ -201,6 +296,151 @@ print(matches[0]['tag_name'], end='')
     }
     printf '%s\n' "$tag"
 }
+
+# Parse NVIDIA driver version from a release tag.
+# Format: v25.10.3.1-nvidia595.58.03-r18 → 595.58.03
+parse_nvidia_version_from_tag() {
+    printf '%s\n' "$1" \
+        | sed -nE 's/^v[0-9.]+-nvidia([0-9]+\.[0-9]+\.[0-9]+)-r[0-9]+$/\1/p'
+}
+
+# Parse TrueNAS version from a release tag.
+# Format: v25.10.3.1-nvidia595.58.03-r18 → 25.10.3.1
+parse_truenas_version_from_tag() {
+    printf '%s\n' "$1" \
+        | sed -nE 's/^v([0-9.]+)-nvidia[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+$/\1/p'
+}
+
+# TrueNAS codename for build-nvidia-sysext.sh's .update URL construction.
+# Mirrors build-nvidia-sysext.sh's auto-detect default; centralized here so
+# the install script can pass an explicit value (build script's auto-detect
+# is fine, but being explicit avoids divergence later).
+resolve_truenas_codename() {
+    case "$1" in
+        25.*) echo "Goldeye" ;;
+        *)    echo "" ;;
+    esac
+}
+
+# Parse NVIDIA driver version out of an NVIDIA .run filename. Returns empty
+# on no match.
+# Format: NVIDIA-Linux-x86_64-X.Y.Z-no-compat32.run → X.Y.Z
+parse_nvidia_version_from_run_file() {
+    basename "$1" \
+        | sed -nE 's/^NVIDIA-Linux-x86_64-([0-9]+\.[0-9]+\.[0-9]+)-no-compat32\.run$/\1/p'
+}
+
+# Read the driver version embedded in a sysext .raw via libnvidia-ml.so.X.Y.Z.
+read_raw_driver_version() {
+    [ -f "$1" ] || return 0
+    unsquashfs -l "$1" 2>/dev/null \
+        | grep -oE 'libnvidia-ml\.so\.[0-9]+\.[0-9]+\.[0-9]+' \
+        | head -1 \
+        | sed 's/^libnvidia-ml\.so\.//' || true
+}
+
+# Read the kernel version a sysext .raw was built for (single subdir of
+# usr/lib/modules/).
+#
+# `unsquashfs -l` prints rooted paths like `squashfs-root/usr/lib/modules/<kver>`
+# with no separator before `usr/`, so the regex anchors on the substring
+# (an earlier `.* usr/lib/modules/` form silently never matched and made
+# cache_valid_for_target always miss, forcing a rebuild on every re-install).
+read_raw_kernel_version() {
+    [ -f "$1" ] || return 0
+    unsquashfs -l "$1" 2>/dev/null \
+        | sed -nE 's|.*usr/lib/modules/([^/[:space:]]+)$|\1|p' \
+        | sort -u | head -1
+}
+
+# 0 if PERSIST_DIR/nvidia.raw matches the target NVIDIA version AND the
+# currently running kernel; 1 otherwise. Hot path on re-installs.
+cache_valid_for_target() {
+    local target_drv="$1"
+    local cached="${PERSIST_DIR}/nvidia.raw"
+    [ -f "$cached" ] || return 1
+    local cached_drv cached_kver running_kver
+    cached_drv=$(read_raw_driver_version "$cached")
+    cached_kver=$(read_raw_kernel_version "$cached")
+    running_kver=$(uname -r)
+    [ -n "$cached_drv" ] && [ "$cached_drv" = "$target_drv" ] || return 1
+    [ -n "$cached_kver" ] && [ "$cached_kver" = "$running_kver" ] || return 1
+    return 0
+}
+
+# Stage build helpers to ${PERSIST_DIR}/scripts/ so the user has a stable
+# invocation point for ad-hoc kernel-bump rebuilds (no need to re-run the
+# full install one-liner). Prefer local checkout when this script is run
+# from one; else fetch from main. Echoes the staged dir on stdout.
+stage_build_helpers() {
+    local stage_dir="${PERSIST_DIR}/scripts"
+    if_real mkdir -p "$stage_dir"
+    local f
+    for f in build-on-host.sh build-nvidia-sysext.sh; do
+        if [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/${f}" ]; then
+            if_real cp "${SCRIPT_DIR}/${f}" "${stage_dir}/${f}"
+        else
+            local url="https://raw.githubusercontent.com/${REPO}/main/scripts/${f}"
+            if $DRY_RUN; then
+                echo "[dry-run] would: curl -fL -o ${stage_dir}/${f} ${url}" >&2
+            else
+                curl -fL --retry 3 -o "${stage_dir}/${f}" "$url" \
+                    || { echo "ERROR: failed to download build helper: $f" >&2; return 1; }
+            fi
+        fi
+        if_real chmod 0755 "${stage_dir}/${f}"
+    done
+    printf '%s\n' "$stage_dir"
+}
+
+# Invoke build-on-host.sh inside a transient ubuntu:24.04 container to
+# produce nvidia.raw. Caches to ${PERSIST_DIR}/cache so the TrueNAS .update
+# (~1.5 GB) and NVIDIA .run (~400 MB) survive between rebuilds. Echoes the
+# path of the built .raw on stdout.
+build_driver_sysext_on_host() {
+    local nvidia_ver="$1" truenas_ver="$2" stage_dir="$3"
+    local codename out_dir built_raw
+    codename=$(resolve_truenas_codename "$truenas_ver")
+    out_dir="${PERSIST_DIR}/build"
+    if_real mkdir -p "$out_dir"
+    built_raw="${out_dir}/nvidia.raw"
+
+    local args=(
+        --nvidia-version="$nvidia_ver"
+        --truenas-version="$truenas_ver"
+        --kernel-module-type="$KMOD_TYPE"
+        --cache-dir="${PERSIST_DIR}/cache"
+        --scripts-dir="$stage_dir"
+        --out="$built_raw"
+    )
+    [ -n "$codename" ] && args+=(--truenas-codename="$codename")
+    [ -n "$CUSTOM_RUN" ] && args+=(--run-file="$CUSTOM_RUN")
+
+    if $DRY_RUN; then
+        echo "[dry-run] would: ${stage_dir}/build-on-host.sh ${args[*]}" >&2
+        echo "[dry-run] would: produce $built_raw" >&2
+        # Synthesize a path so downstream sanity-check gates can skip cleanly
+        # under DRY_RUN without NPE-ing on an unset variable.
+        printf '%s\n' "$built_raw"
+        return 0
+    fi
+
+    # Redirect to stderr: build-on-host.sh's info/banner lines and the
+    # docker run's container stdout all use fd 1. This function returns
+    # the built path via stdout for $(…) capture by callers, so the build
+    # log would otherwise be appended to the captured path and break the
+    # downstream `[ -f "$DRIVER_SRC" ]` check.
+    "${stage_dir}/build-on-host.sh" "${args[@]}" >&2 \
+        || { echo "ERROR: build-on-host.sh failed" >&2; return 1; }
+    [ -f "$built_raw" ] \
+        || { echo "ERROR: build-on-host claimed success but $built_raw is missing" >&2; return 1; }
+    printf '%s\n' "$built_raw"
+}
+
+# Path to this script's own directory if invoked from a checkout; empty when
+# piped from stdin (curl|bash). Used both for staging build helpers and the
+# PREINIT script. `BASH_SOURCE[0]:-` to dodge set -u when reading from stdin.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || true)"
 
 [ "$(id -u 2>/dev/null)" = "0" ] || { echo "ERROR: must run as root" >&2; exit 1; }
 
@@ -675,17 +915,81 @@ if [ -z "$MIG_SRC" ]; then
 fi
 [ -f "$MIG_SRC" ] || { echo "ERROR: MIG sysext source not found: $MIG_SRC" >&2; exit 1; }
 
-# --- Fetch nvidia.raw if --with-driver and not provided ---
-DRIVER_TMP=""
-if $WITH_DRIVER && [ -z "$DRIVER_SRC" ]; then
-    DRIVER_TMP=$(mktemp -t nvidia.raw.XXXXXX)
-    DRIVER_URL="https://github.com/${REPO}/releases/download/${RESOLVED_TAG}/${DRIVER_ASSET}"
-    echo "Downloading ${DRIVER_URL}"
-    curl -fL --retry 3 -o "$DRIVER_TMP" "$DRIVER_URL" \
-        || { echo "ERROR: failed to download nvidia.raw" >&2; rm -f "$DRIVER_TMP" "$MIG_TMP"; exit 1; }
-    DRIVER_SRC="$DRIVER_TMP"
+# --- Acquire nvidia.raw (--with-driver only) ---
+# Priority:
+#   1. --driver-sysext=PATH       — use as-is, skip build entirely
+#   2. cached PERSIST_DIR/nvidia.raw matches target driver + running kernel
+#      — reuse it (skip the ~8 min build) unless --rebuild was passed
+#   3. otherwise — build on this host via build-on-host.sh
+#
+# DRIVER_ASSET is no longer a release asset; the repo doesn't publish
+# nvidia.raw (NVIDIA EULA — see README License section). The release tag
+# still encodes the recommended-tested driver version for the install
+# script to target.
+if $WITH_DRIVER; then
+    if [ -n "$DRIVER_SRC" ]; then
+        echo "Using pre-built driver sysext: $DRIVER_SRC (--driver-sysext given; skipping build)"
+    else
+        # Resolve target NVIDIA version: from --custom-run filename if given,
+        # else parsed from the resolved release tag.
+        TARGET_NV_VER=""
+        if [ -n "$CUSTOM_RUN" ]; then
+            TARGET_NV_VER=$(parse_nvidia_version_from_run_file "$CUSTOM_RUN")
+            if [ -z "$TARGET_NV_VER" ]; then
+                echo "ERROR: cannot parse version from --custom-run filename '$CUSTOM_RUN'" >&2
+                echo "       Expected: NVIDIA-Linux-x86_64-<X.Y.Z>-no-compat32.run" >&2
+                exit 1
+            fi
+            echo "Custom .run version: $TARGET_NV_VER ($(basename "$CUSTOM_RUN"))"
+        else
+            TARGET_NV_VER=$(parse_nvidia_version_from_tag "$RESOLVED_TAG")
+            if [ -z "$TARGET_NV_VER" ]; then
+                echo "ERROR: cannot parse NVIDIA version from release tag '$RESOLVED_TAG'" >&2
+                echo "       Pass --custom-run=PATH to specify an installer explicitly." >&2
+                exit 1
+            fi
+            echo "Target NVIDIA driver (from release tag): $TARGET_NV_VER"
+        fi
+
+        # Resolve target TrueNAS version. Prefer parsed-from-tag (matches
+        # what the release was tested against); fall back to live midclt.
+        TARGET_TN_VER=$(parse_truenas_version_from_tag "$RESOLVED_TAG")
+        if [ -z "$TARGET_TN_VER" ]; then
+            TARGET_TN_VER=$(detect_truenas_version || true)
+            if [ -z "$TARGET_TN_VER" ]; then
+                echo "ERROR: cannot determine TrueNAS version for the build" >&2
+                exit 1
+            fi
+        fi
+
+        if ! $REBUILD && cache_valid_for_target "$TARGET_NV_VER"; then
+            DRIVER_SRC="${PERSIST_DIR}/nvidia.raw"
+            echo "Reusing cached driver sysext (driver=$TARGET_NV_VER, kernel=$(uname -r))"
+            echo "  $DRIVER_SRC"
+            echo "  (pass --rebuild to force a fresh build)"
+        else
+            if $REBUILD; then
+                echo "--rebuild given; ignoring any cached nvidia.raw"
+            else
+                echo "No valid cached nvidia.raw for driver=$TARGET_NV_VER + kernel=$(uname -r); building on host"
+                echo "(first run takes ≈ 8 min; cached for subsequent installs)"
+            fi
+            STAGED_SCRIPTS_DIR=$(stage_build_helpers) \
+                || { echo "ERROR: failed to stage build helpers" >&2; exit 1; }
+            DRIVER_SRC=$(build_driver_sysext_on_host "$TARGET_NV_VER" "$TARGET_TN_VER" "$STAGED_SCRIPTS_DIR") \
+                || exit 1
+            echo "Built driver sysext: $DRIVER_SRC"
+        fi
+    fi
+
+    # Existence check — skip in dry-run since the build path synthesizes a
+    # not-yet-created path. --driver-sysext / cache-reuse paths produce a
+    # real file even under dry-run.
+    if ! $DRY_RUN && [ ! -f "$DRIVER_SRC" ]; then
+        echo "ERROR: driver sysext source not found: $DRIVER_SRC" >&2
+        exit 1
+    fi
 fi
-$WITH_DRIVER && { [ -f "$DRIVER_SRC" ] || { echo "ERROR: driver sysext source not found: $DRIVER_SRC" >&2; exit 1; }; }
 
 # Single cleanup trap for any tempfiles we created.
 cleanup_tmp() {
@@ -709,7 +1013,10 @@ if ! printf '%s\n' "$MIG_LISTING" | grep -q 'extension-release.nvidia-mig'; then
 fi
 
 # --- Sanity-check the driver sysext contents (--with-driver) ---
-if $WITH_DRIVER; then
+# Skip under dry-run when the build path synthesized a not-yet-built path.
+# --driver-sysext and cache-reuse always produce a real file, so we still
+# validate in those cases even in dry-run.
+if $WITH_DRIVER && { ! $DRY_RUN || [ -f "$DRIVER_SRC" ]; }; then
     if ! DRIVER_LISTING=$(unsquashfs -l "$DRIVER_SRC" 2>/dev/null); then
         echo "ERROR: unsquashfs -l failed on $DRIVER_SRC" >&2
         exit 1
@@ -747,17 +1054,24 @@ if_real cp "$MIG_SRC" "${PERSIST_DIR}/nvidia-mig.raw"
 $DRY_RUN || echo "Copied MIG sysext to ${PERSIST_DIR}/nvidia-mig.raw"
 
 if $WITH_DRIVER; then
-    if_real cp "$DRIVER_SRC" "${PERSIST_DIR}/nvidia.raw"
-    $DRY_RUN || echo "Copied driver sysext to ${PERSIST_DIR}/nvidia.raw"
+    # Cache-reuse branch (line ~920) sets DRIVER_SRC to ${PERSIST_DIR}/nvidia.raw
+    # directly, so `cp src dst` would be `cp X X` and cp errors out. Skip
+    # the copy when src and dst are already the same file. `-ef` handles
+    # symlinks, relative paths, and hard links correctly.
+    if [ "$DRIVER_SRC" -ef "${PERSIST_DIR}/nvidia.raw" ] 2>/dev/null; then
+        $DRY_RUN || echo "Driver sysext already at ${PERSIST_DIR}/nvidia.raw (cache-reuse); skipping copy"
+    else
+        if_real cp "$DRIVER_SRC" "${PERSIST_DIR}/nvidia.raw"
+        $DRY_RUN || echo "Copied driver sysext to ${PERSIST_DIR}/nvidia.raw"
+    fi
 
     # Stage nvidia-preinit-driver.sh BEFORE any /usr mutations so a failed
     # download fails fast instead of leaving the host half-installed.
     # Fetched from main (durable), not the current branch.
     SCRIPT_URL_BASE="https://raw.githubusercontent.com/${REPO}/main/scripts"
     PREINIT_LOCAL="${PERSIST_DIR}/nvidia-preinit-driver.sh"
-    # `${BASH_SOURCE[0]:-}` (not bare) so curl|bash doesn't trip set -u —
-    # when reading from stdin BASH_SOURCE[0] is unset.
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd 2>/dev/null || true)"
+    # SCRIPT_DIR is resolved at script load to the dirname of $0 (empty when
+    # curl|bash'd from stdin), used here and by stage_build_helpers.
     if $DRY_RUN; then
         PREINIT_DRY_TMP=$(mktemp -t nvidia-preinit-driver.XXXXXX.sh)
         PREINIT_STAGE="$PREINIT_DRY_TMP"
@@ -790,40 +1104,136 @@ if $WITH_DRIVER; then
         fi
     fi
 
-    # Stop app services (TrueNAS's containerized app runtime) so the GPU
-    # is free, then wait for any running compute processes to drain.
-    # User-facing strings say "app services"; the actual middleware API
-    # endpoint is still called `docker.update` (kept in code as the literal
-    # API name).
+    # Free the GPU so we can swap nvidia.raw safely. The docker.update
+    # '{"nvidia": false}' toggle alone is NOT enough — it only reconfigures
+    # the docker runtime for future container starts, leaving running
+    # containers (Frigate's ffmpeg NVENC, Ollama CUDA, etc.) attached. They
+    # hold the kernel module past the wait window and the swap proceeds
+    # with stale handles still in memory. The reboot afterward usually
+    # masks this, but only by accident.
+    #
+    # Mirrors configure-mig.sh's per-app stop (PR #48). Three steps:
+    #   1. Identify apps with a *currently-valid* GPU UUID assignment
+    #      (use_gpu=true AND uuid matches a device on the current GPU).
+    #   2. app.stop -j each one — blocks on actual container teardown.
+    #   3. docker.update toggle as belt-and-suspenders for any nvidia
+    #      runtime container outside the per-app scan.
+    # Drain check after that should be near-instant; on timeout we warn
+    # and continue (reboot resolves any latent issue — install's required-
+    # reboot semantics let us be lenient where configure-mig must abort).
     echo ""
-    echo "Stopping app services (releasing the GPU)..."
-    if $DRY_RUN; then
-        echo "[dry-run] would: midclt call docker.update '{\"nvidia\": false}'"
-    else
-        midclt call docker.update '{"nvidia": false}' >/dev/null \
-            || echo "WARN: app services API call (docker.update) failed — middleware may be transitionally down; continuing"
-    fi
+    echo "Stopping GPU-bound apps to free the GPU..."
 
     if $DRY_RUN; then
-        echo "[dry-run] would: wait up to 120s for running GPU processes to drain"
+        echo "[dry-run] would: scan app.query for apps with use_gpu=true + a valid GPU UUID"
+        echo "[dry-run] would: app.stop -j each match, then docker.update '{\"nvidia\": false}'"
+        echo "[dry-run] would: wait up to 30s for GPU compute clients to release"
     elif [ -x /usr/bin/nvidia-smi ]; then
-        # Always print a first line so the user sees a counter even when
-        # the GPU is released within the first poll interval. Then either
-        # the carriage-return progress overwrites it, or "GPU released"
-        # supersedes it.
-        printf "  Waiting for GPU to be released... 0s/120s"
-        for attempt in $(seq 1 24); do
+        VALID_UUIDS=$(/usr/bin/nvidia-smi -L 2>/dev/null \
+            | sed -nE 's/.*\(UUID:[[:space:]]*((GPU|MIG)-[^)]+)\).*/\1/p' || true)
+
+        # `|| true` on every middleware command substitution — `set -e` +
+        # pipefail would abort the whole install if any single app's
+        # config read fails (mid-deploy, crashed, transient middleware
+        # error). Pattern carried over from uninstall + configure-mig.
+        ALL_APPS=$(midclt call app.query 2>/dev/null | python3 -c "
+import sys, json
+try:
+    for a in json.load(sys.stdin):
+        n = a.get('name', '')
+        s = a.get('state', '')
+        if n: print(f'{n}|{s}')
+except Exception:
+    pass" 2>/dev/null || true)
+
+        GPU_APPS_INFO=""
+        if [ -n "$ALL_APPS" ]; then
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                app="${line%|*}"
+                state="${line#*|}"
+                config_json=$(midclt call app.config "$app" 2>/dev/null || true)
+                is_gpu=$(printf '%s' "$config_json" | VALID_UUIDS="$VALID_UUIDS" python3 -c "
+import sys, json, os
+valid = set(os.environ.get('VALID_UUIDS', '').split())
+try:
+    d = json.load(sys.stdin)
+    gpus = (d.get('resources', {}) or {}).get('gpus', {}) or {}
+    sel = gpus.get('nvidia_gpu_selection', {}) or {}
+    for slot, cfg in sel.items():
+        if isinstance(cfg, dict):
+            uuid = (cfg.get('uuid') or '').strip()
+            # Two gates (same as configure-mig): use_gpu must be
+            # explicitly true, AND uuid must reference a device on
+            # the current hardware (filters stale GPU-swap UUIDs).
+            if cfg.get('use_gpu') is True and uuid and uuid in valid:
+                print('y')
+                break
+except Exception:
+    pass" 2>/dev/null || true)
+                if [ "$is_gpu" = "y" ]; then
+                    GPU_APPS_INFO+="$app|$state"$'\n'
+                fi
+            done <<<"$ALL_APPS"
+        fi
+
+        if [ -z "$GPU_APPS_INFO" ]; then
+            echo "  No GPU-bound apps found"
+        else
+            echo "  GPU-bound apps (will be stopped):"
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                IFS='|' read -r gapp gstate <<<"$line"
+                echo "    $gapp (state=$gstate)"
+            done <<<"$GPU_APPS_INFO"
+
+            echo ""
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                IFS='|' read -r app state <<<"$line"
+                if [ "$state" != "RUNNING" ]; then
+                    echo "  $app: state=$state — no container to stop"
+                    continue
+                fi
+                if run_with_elapsed_capture "  Stopping $app" \
+                    midclt call -j app.stop "$app"; then
+                    echo "  Stopping $app... OK (${ELAPSED}s)"
+                else
+                    echo "  Stopping $app... WARN (${ELAPSED}s): $CAPTURED_OUT"
+                fi
+            done <<<"$GPU_APPS_INFO"
+        fi
+
+        echo ""
+        echo "  Disabling nvidia toolkit for docker (belt-and-suspenders)..."
+        midclt call docker.update '{"nvidia": false}' >/dev/null \
+            || echo "  WARN: docker.update returned an error — middleware may be flapping"
+
+        # Short drain — per-app stop already blocked on container teardown,
+        # so this only catches the brief window before the driver releases
+        # CUDA contexts. 30s is plenty when step 2 actually worked.
+        printf "  Waiting for GPU compute clients to release... 0s/30s"
+        for attempt in $(seq 1 10); do
             N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
             if [ "${N:-0}" -eq 0 ]; then
-                printf "\r  GPU released                                            \n"
+                printf "\r  GPU compute clients released                              \n"
                 break
             fi
-            printf "\r  Waiting for %d GPU process(es)... %ds/120s" "$N" "$((attempt * 5))"
-            sleep 5
+            printf "\r  Waiting for %d GPU process(es)... %ds/30s" "$N" "$((attempt * 3))"
+            sleep 3
         done
-        # Newline-after-progress guard in case we exited the loop on the
-        # max iteration without a "released" message.
-        [ "${attempt:-0}" -eq 24 ] && echo ""
+        if [ "${N:-0}" -gt 0 ]; then
+            echo ""
+            echo "  WARN: $N GPU process(es) still attached after 30s — continuing anyway."
+            echo "        Likely a non-app holder (bare CUDA, manual nvidia-smi, jail/VM passthrough)."
+            echo "        --with-driver requires a reboot regardless, which will clear any stale state."
+        fi
+    else
+        # No nvidia-smi (shouldn't happen on a --with-driver install with
+        # stock driver present, but be defensive). Fall back to toggle only.
+        echo "  nvidia-smi missing; toggling docker.nvidia=false only (no drain check)"
+        midclt call docker.update '{"nvidia": false}' >/dev/null \
+            || echo "  WARN: docker.update returned an error"
     fi
 fi
 
