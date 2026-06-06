@@ -57,6 +57,8 @@ The `make_latest` GitHub flag is what users pin to, not a tag name. Two sources 
 
 How `install-mig-sysext.sh` finds the right release: detect local TrueNAS version via `midclt call system.info`, query `/repos/.../releases`, filter by `v<version>-nvidia` prefix, pick the most-recently-published. The release exposes `nvidia-mig.raw`, which the install script always downloads. With `--with-driver`, the script also parses the NVIDIA driver version out of the tag (`v25.10.3.1-nvidia595.58.03-r18` → `595.58.03`) and feeds it to `build-on-host.sh` for the on-host driver build. See `resolve_release_tag()` and `parse_nvidia_version_from_tag()` in [`scripts/install-mig-sysext.sh`](../scripts/install-mig-sysext.sh).
 
+Note the two caches are unrelated. CI's `build-nvidia` job keeps the built `nvidia.raw` only as a 30-day GitHub Actions run artifact (and caches the TrueNAS `.update` in the runner cache backend across runs) — it never persists the compiled driver. The user's host keeps its own persistent cache at `${PERSIST_DIR}/cache/` plus the built `${PERSIST_DIR}/nvidia.raw`, which `--with-driver` reuses when the driver version + running kernel match. CI proves the build recipe works; the host produces and keeps the actual driver.
+
 Tag schema choices worth noting:
 
 - **One tag, two assets.** Earlier iterations of this repo produced separate `v<truenas>-mig-r<run>` releases for the lightweight path; the model changed when we collapsed onto a single install script (`install-mig-sysext.sh`) with a `--with-driver` flag. One release carrying both assets lines up with one install operation per host.

@@ -221,6 +221,9 @@ Everything that must survive a TrueNAS update lives under `/mnt/<pool>/.config/n
 | `nvidia-mig.raw` | MIG sysext (always installed). Symlinked from `/etc/extensions/`. |
 | `mig.conf` | `MIG_PROFILES=14,14,14,14` style config read by `nvidia-mig-setup`. |
 | `nvidia-preinit-driver.sh` | Driver-side PREINIT script (`--with-driver` only). Registered via `midclt` so survives DB updates too. |
+| `cache/` | TrueNAS `.update` (~1.5 GB) + NVIDIA `.run` (~400 MB) downloads (`--with-driver` only). Reused across rebuilds so warm builds skip the downloads. Removed by uninstall unless `--keep-cache`/`--keep-persist`. |
+| `scripts/` | Build helpers (`build-on-host.sh`, `build-nvidia-sysext.sh`) staged on first `--with-driver` install so you can rebuild after a kernel bump without re-running the curl-bash one-liner. Removed by uninstall unless `--keep-persist`. |
+| `build/` | Scratch tree for the on-host build (`--with-driver` only). Removed by uninstall unless `--keep-persist`. |
 
 ## Why ZFS readonly matters
 
