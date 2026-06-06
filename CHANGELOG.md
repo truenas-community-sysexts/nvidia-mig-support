@@ -11,6 +11,7 @@ A `--with-driver` install frees the GPU before swapping the driver: it stops eve
 - **Toggle restored to its captured prior value, not a hardcoded `true`.** install reads `docker.config.nvidia` before disabling it and restores that exact value on abort, so a user who had the toggle off to begin with keeps it off. (uninstall/recover still hardcode `true`; this is the more correct behavior and could be backported.)
 - **Success path now names the stopped apps.** On a clean `--with-driver` finish the script lists the apps it stopped and states plainly that configure-mig restarts them after reboot, so the apps being down is not a silent surprise.
 - **Rollback restores the toggle before restarting apps.** Follow-up to the above: in the pre-swap rollback the toggle is re-enabled first, then the apps are restarted. With the toggle off, TrueNAS won't start any docker container (GPU or not), so an `app.start` ahead of the toggle restore would no-op.
+- **Rollback also restarts an app interrupted mid-stop.** `app.stop -j` is a blocking job; if the abort lands during the call the middleware may still stop the app server-side, but it never reached the success branch that records it. A separate `STOPPING_APP` marker tracks the in-flight app so the rollback restarts it too. A cleanly-failed stop (app still up) is deliberately left out, so no app is needlessly restarted.
 
 ## NVIDIA driver built on the host, not redistributed (PR #59)
 

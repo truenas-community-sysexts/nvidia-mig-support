@@ -1022,6 +1022,7 @@ USR_DATASET=""
 TOGGLE_DISABLED=0       # 1 once we've written docker.update {"nvidia": false}
 ORIG_NVIDIA_TOGGLE=""   # toggle value captured before we disabled it
 STOPPED_APPS=""         # newline-separated apps we stopped, to restart on abort
+STOPPING_APP=""         # app whose app.stop is in flight right now (mid-call abort)
 SWAP_STARTED=0          # 1 once the driver teardown (unmerge/swap) has begun
 
 # Cleanup trap: tempfiles + /usr readonly always; on abnormal exit, also undo
@@ -1079,8 +1080,14 @@ cleanup_tmp() {
         midclt call docker.update "{\"nvidia\": ${want}}" >/dev/null 2>&1 \
             || echo "    WARN: could not restore the toggle, set it in the Apps settings" >&2
     fi
-    if [ -n "$STOPPED_APPS" ]; then
-        printf '%s\n' "$STOPPED_APPS" | while IFS= read -r a; do
+    # Include any app whose app.stop was in flight when we aborted: it never
+    # reached the success branch, so it's not in STOPPED_APPS, but the job may
+    # have stopped it server-side. Restarting an app that's actually still up is
+    # a harmless no-op.
+    APPS_TO_RESTART="$STOPPED_APPS"
+    [ -n "$STOPPING_APP" ] && APPS_TO_RESTART+="$STOPPING_APP"$'\n'
+    if [ -n "$APPS_TO_RESTART" ]; then
+        printf '%s\n' "$APPS_TO_RESTART" | while IFS= read -r a; do
             [ -z "$a" ] && continue
             echo "  Restarting $a..." >&2
             midclt call -j app.start "$a" >/dev/null 2>&1 \
@@ -1306,6 +1313,11 @@ except Exception:
                     echo "  $app: state=$state — no container to stop"
                     continue
                 fi
+                # Mark in-flight before the call. app.stop -j is a blocking job;
+                # if a signal kills the client mid-call the middleware may still
+                # finish stopping the app, so the rollback must know to restart
+                # it even though we never reached the success branch below.
+                STOPPING_APP="$app"
                 if run_with_elapsed_capture "  Stopping $app" \
                     midclt call -j app.stop "$app"; then
                     echo "  Stopping $app... OK (${ELAPSED}s)"
@@ -1314,6 +1326,10 @@ except Exception:
                 else
                     echo "  Stopping $app... WARN (${ELAPSED}s): $CAPTURED_OUT"
                 fi
+                # Call returned (success or clean failure): no longer in flight.
+                # A clean failure means the app is still up, so we deliberately
+                # leave it out of STOPPED_APPS — nothing to restart.
+                STOPPING_APP=""
             done <<<"$GPU_APPS_INFO"
         fi
 
