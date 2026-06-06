@@ -106,7 +106,7 @@ truenas_api_client.exc.ClientException: Failed connection handshake
 
 **Cause:** TrueNAS middleware is transitionally restarting. This happens when `systemd-sysext unmerge`/`merge` flaps the nvidia sysext — the middleware re-evaluates Docker's GPU state asynchronously and briefly disconnects clients. Also common in the first ~30 s after a fresh boot, before middleware has finished starting.
 
-**Fix (usually nothing):** The MIG service has its own retry loop and will recover (you'll see `Waiting for TrueNAS middleware (attempt N/5)` in the journal). For interactive `midclt` calls, wait 30–60 s and retry, or run:
+**Fix (usually nothing):** The MIG service has its own retry loop and will recover (you'll see `Waiting for TrueNAS middleware to be ready (system.ready); timeout=25s...` in the journal). For interactive `midclt` calls, wait 30–60 s and retry, or run:
 
 ```bash
 sudo midclt call system.ready
@@ -135,9 +135,86 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mi
   | sudo bash -s -- --check
 ```
 
-The most actionable failure to look for is a kernel-version mismatch — the PREINIT script writes `ERROR: kernel-version mismatch — running <kver> but sysext bundles modules for <kver>` to the syslog tag above when this happens, and points at the install one-liner to fix.
+The most actionable failure to look for is a kernel-version mismatch — the PREINIT script writes `ERROR: kernel-version mismatch — running <kver> but sysext bundles modules for <kver>` to the syslog tag above when this happens, and points at the install one-liner to fix. This means the TrueNAS update bumped the kernel, so the cached `nvidia.raw` (compiled against the old kernel) no longer loads. A plain reboot won't fix it — you have to **rebuild** the driver against the new kernel:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
+  | sudo bash -s -- --with-driver --rebuild
+sudo reboot
+```
+
+The rebuild is warm (the TrueNAS `.update` + NVIDIA `.run` are still cached), so it's ~3 min rather than the cold ~8 min. If the build helpers were staged on first install, you can also invoke the build directly: `sudo /mnt/<pool>/.config/nvidia-gpu/scripts/build-on-host.sh --help`.
 
 If something went wrong and the PREINIT didn't run (or the persistent `/mnt/<pool>/.config/nvidia-gpu/nvidia.raw` is missing): re-run `install-mig-sysext.sh --with-driver`. Use `--dry-run` first if you want to walk through what it would do before letting it mutate the system.
+
+## `--with-driver` fails because Docker isn't available
+
+```text
+ERROR: docker not found / Cannot connect to the Docker daemon
+```
+
+**Cause:** `--with-driver` builds `nvidia.raw` inside a transient `ubuntu:24.04` container, so it needs a working Docker daemon. TrueNAS Apps users already have one. On a headless box with Apps disabled the install script starts Docker for the build and restores its prior state on exit — but it can't do that if Docker isn't installed at all.
+
+**Fix:** Confirm the daemon is present and reachable:
+
+```bash
+sudo docker info >/dev/null && echo "docker OK"
+sudo systemctl status docker
+```
+
+- **Apps users:** make sure the Apps service is configured (it provisions Docker). If `docker info` still fails, start it: `sudo systemctl start docker`.
+- **No Apps / no Docker at all:** build `nvidia.raw` on another machine and hand it to the install with `--driver-sysext=/path/to/nvidia.raw`, which skips the on-host build entirely.
+
+## `--with-driver` build fails (download / compile / squashfs)
+
+```text
+[FATAL] Failed to download .update file
+[FATAL] NVIDIA installer failed
+[FATAL] No .ko kernel modules found
+```
+
+**Cause:** The on-host build downloads the TrueNAS `.update` (~1.5 GB) and NVIDIA `.run` (~400 MB), cross-compiles `nvidia.ko` against the extracted kernel headers, and squashfs's the result. Failures usually mean a network problem, not enough scratch disk (~3 GB needed), or an upstream format change (NVIDIA/TrueNAS altered an installer or layout the build script assumes).
+
+**Fix:**
+
+1. Check free space on the persist pool — the cache + build dirs need ~3 GB:
+
+   ```bash
+   df -h /mnt/*/.config/nvidia-gpu/
+   ```
+
+2. Check reachability of both upstreams:
+
+   ```bash
+   curl -I https://download.nvidia.com/XFree86/Linux-x86_64/latest.txt
+   ```
+
+3. Force a clean rebuild (re-downloads everything, discards any half-written cache):
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
+     | sudo bash -s -- --with-driver --rebuild
+   ```
+
+4. If it still fails, the build script may have broken against current upstream. The release's CI smoke-test (`build-sysext.yml`'s `build-nvidia` job) builds the same way — a red run there confirms it's upstream, not your host. File an issue with the build log.
+
+If you already have a `.run` downloaded, `--custom-run=/path/to/NVIDIA-Linux-x86_64-<ver>.run` skips the NVIDIA download.
+
+## Large disk usage under `/mnt/<pool>/.config/nvidia-gpu/cache/`
+
+```bash
+du -sh /mnt/*/.config/nvidia-gpu/cache/   # ~2 GB
+```
+
+**Cause:** This is intentional. `--with-driver` caches the TrueNAS `.update` and NVIDIA `.run` so rebuilds (e.g. after a kernel bump) are ~3 min instead of a cold ~8 min. It survives between builds and is keyed on version.
+
+**Fix (only if space is tight):** it's safe to delete — the next build re-downloads as needed:
+
+```bash
+sudo rm -rf /mnt/*/.config/nvidia-gpu/cache/
+```
+
+If you're uninstalling but plan to reinstall soon, `uninstall-mig-sysext.sh --keep-cache` keeps this dir while cleaning everything else.
 
 ## MIG instances don't come back after reboot
 
@@ -165,10 +242,10 @@ If `mig.conf` looks fine but the service still didn't run, see the PREINIT troub
 
 **Cause:** You changed the MIG layout (e.g. went from `14,14,14,14` to `47,47,14,14`) and the old MIG UUIDs no longer exist. The MIG service's app-remap step only remaps to the *first* available MIG UUID — apps that need a specific MIG device need to be reassigned manually.
 
-**Fix:** Re-run `configure-mig` and use the interactive app assignment walk-through:
+**Fix:** Re-run `configure-mig` (without `--skip-app-mapping`) so it walks through interactive app assignment:
 
 ```bash
-sudo configure-mig --skip-mig-conf
+sudo configure-mig
 ```
 
 Or via the TrueNAS UI: Apps → app → Edit → Resources → NVIDIA GPU → pick the right MIG UUID.
@@ -180,7 +257,7 @@ Or via the TrueNAS UI: Apps → app → Edit → Resources → NVIDIA GPU → pi
 **Fix:** First, check what your TrueNAS version actually ships — recent 25.10.x patches all pin 570.172.08, so an older detected version suggests a non-standard install. Either upgrade TrueNAS, or install a custom driver alongside MIG:
 
 ```bash
-# Install a current driver from this repo's releases + MIG tooling on top
+# Build a current driver on this host + install MIG tooling on top
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh \
   | sudo bash -s -- --with-driver
 ```

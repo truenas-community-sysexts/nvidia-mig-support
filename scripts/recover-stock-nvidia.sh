@@ -43,6 +43,26 @@ if [ "$(id -u 2>/dev/null)" != "0" ]; then
     exit 1
 fi
 
+# Track mutations so the trap can undo them if we die mid-install (failure
+# under set -e, or a SIGTERM/SIGINT). Without this, an abort between
+# readonly=off and readonly=on leaves /usr writable until reboot, and an abort
+# after the docker toggle leaves nvidia stuck off, both until manually fixed.
+USR_WAS_WRITABLE=0
+USR_DATASET=""
+DOCKER_NVIDIA_DISABLED=0
+
+restore_state() {
+    if [ "$USR_WAS_WRITABLE" = "1" ] && [ -n "$USR_DATASET" ]; then
+        zfs set readonly=on "$USR_DATASET" 2>/dev/null || true
+        USR_WAS_WRITABLE=0
+    fi
+    if [ "$DOCKER_NVIDIA_DISABLED" = "1" ]; then
+        midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+        DOCKER_NVIDIA_DISABLED=0
+    fi
+}
+trap restore_state EXIT INT TERM
+
 [ -n "$VERSION" ] || VERSION=$(cat /etc/version 2>/dev/null | tr -d '[:space:]')
 [ -n "$VERSION" ] || { echo "ERROR: cannot determine TrueNAS version, pass --version=X.Y.Z" >&2; exit 1; }
 
@@ -219,13 +239,19 @@ if $DO_INSTALL; then
         echo "=== Installing stock nvidia.raw over current ==="
         echo "Stopping Docker so the GPU is free..."
         midclt call docker.update '{"nvidia": false}' >/dev/null
+        DOCKER_NVIDIA_DISABLED=1
 
         echo "Unmerging sysext..."
         systemd-sysext unmerge
 
         USR_DATASET=$(zfs list -H -o name /usr)
+        if [ -z "$USR_DATASET" ]; then
+            echo "ERROR: could not determine the ZFS dataset for /usr" >&2
+            exit 1
+        fi
         echo "Setting ${USR_DATASET} writable..."
         zfs set readonly=off "${USR_DATASET}"
+        USR_WAS_WRITABLE=1
 
         # Backup current (custom) as .bak in case we need it later
         if [ ! -f "${SYSEXT_DIR}/nvidia.raw.bak" ]; then
@@ -236,6 +262,7 @@ if $DO_INSTALL; then
 
         echo "Restoring ${USR_DATASET} readonly..."
         zfs set readonly=on "${USR_DATASET}"
+        USR_WAS_WRITABLE=0
 
         echo "Ensuring /etc/extensions/nvidia.raw symlink..."
         mkdir -p /etc/extensions
@@ -247,6 +274,7 @@ if $DO_INSTALL; then
 
         echo "Re-enabling NVIDIA in Docker..."
         midclt call docker.update '{"nvidia": true}' >/dev/null
+        DOCKER_NVIDIA_DISABLED=0
 
         sleep 3
         DRIVER=$(/usr/bin/nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null || echo "unknown")

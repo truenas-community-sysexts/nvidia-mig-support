@@ -2,6 +2,19 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## NVIDIA driver built on the host, not redistributed (PR #59)
+
+`nvidia.raw` is no longer published as a release asset. NVIDIA's EULA prohibits us from redistributing the proprietary userspace it bundles, and the org's no-binary-redistribution policy (profile/README.md) says we shouldn't. The previous `--with-driver` flow downloaded a `nvidia.raw` we attached to every release — that violated both. The driver is now **built on the user's TrueNAS host**, where the operator accepts NVIDIA's EULA themselves.
+
+- **`--with-driver` builds `nvidia.raw` on host.** The install script runs `scripts/build-on-host.sh` (a thin wrapper around the unchanged `scripts/build-nvidia-sysext.sh`) inside a transient `ubuntu:24.04` docker container. The NVIDIA `.run` runs with `--accept-license --silent`, so the host operator accepts the [NVIDIA driver EULA](https://www.nvidia.com/en-us/drivers/nvidia-license/) on their own behalf. First build ≈ 8 min; the TrueNAS `.update` (~1.5 GB) and NVIDIA `.run` (~400 MB) are cached at `${PERSIST_DIR}/cache/` so warm rebuilds are ~3 min.
+- **Build output is cached and reused.** The built `nvidia.raw` lands at `${PERSIST_DIR}/nvidia.raw` and is reused on re-install when the driver version and running kernel both match (~10 s, no rebuild). `--rebuild` forces a fresh build.
+- **Release assets are MIG-only.** Releases now carry just `nvidia-mig.raw` (+ `.sha256`). `build-sysext.yml` still *builds* `nvidia.raw` as a smoke test that gates the release — if the build script breaks against current upstream the release fails, rather than shipping a recipe that would break on every user's host — but the artifact is kept only as a 30-day workflow run artifact, never published. (Supersedes the "single tag carries both assets" / "downloads both assets" wording in the *Unified Sysext Release* entry below.)
+- **New `--with-driver` flags.** `--rebuild` (force fresh build), `--custom-run=PATH` (use a local NVIDIA `.run`), `--kmod=open|proprietary` (default open; proprietary path wired in but untested). `--driver-sysext=PATH` is retained as the escape hatch for a sysext built elsewhere.
+- **Uninstall cleans build artifacts.** `uninstall-mig-sysext.sh` now removes the `build/`, `scripts/`, and `cache/` persist dirs by default (only `nvidia-original.raw` survives, for recovery). New `--keep-cache` preserves the ~2 GB cache for an imminent reinstall; `--keep-persist` still keeps everything.
+- **Install releases the GPU per-app.** The `--with-driver` install now stops each GPU-holding app with `app.stop` before the sysext swap (matching configure-mig/uninstall), instead of the `docker.update '{"nvidia": false}'` toggle that couldn't evict live CUDA/NVENC contexts.
+
+Validated end-to-end on hardware (TrueNAS 25.10.3.1 + RTX PRO 6000 Blackwell).
+
 ## nvidia toggle handling: uninstall now restores it, configure-mig waits post-boot
 
 Two related issues with the `docker.config.nvidia` toggle (TrueNAS UI: Apps → Settings → "Use NVIDIA GPU"), both surfaced after hardware testing PR #49.

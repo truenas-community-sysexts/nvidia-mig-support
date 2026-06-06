@@ -194,6 +194,18 @@ fi
 
 log "GPU PCI slot: $PCI_SLOT"
 
+# Build the app.update payload with python3 (slot and uuid passed as argv)
+# instead of interpolating into a JSON string literal, to avoid quoting and
+# escaping fragility. Loop-invariant, so build it once.
+MIG_UPDATE_PAYLOAD=$(python3 -c '
+import json, sys
+slot, uuid = sys.argv[1], sys.argv[2]
+print(json.dumps({"values": {"resources": {"gpus": {
+    "use_all_gpus": False,
+    "nvidia_gpu_selection": {slot: {"use_gpu": True, "uuid": uuid}},
+}}}}))
+' "$PCI_SLOT" "$COMPUTE_UUID")
+
 # Query all apps and find ones with existing MIG UUID assignments
 midclt call app.query 2>/dev/null | python3 -c "
 import sys, json
@@ -223,7 +235,7 @@ for app in apps:
                 print(f'{name}:{old_uuid}')
 " 2>/dev/null | while IFS=: read -r app_name old_uuid; do
     log "Updating $app_name: $old_uuid -> $COMPUTE_UUID"
-    midclt call app.update "$app_name" "{\"values\":{\"resources\":{\"gpus\":{\"use_all_gpus\":false,\"nvidia_gpu_selection\":{\"$PCI_SLOT\":{\"use_gpu\":true,\"uuid\":\"$COMPUTE_UUID\"}}}}}}" 2>/dev/null \
+    midclt call app.update "$app_name" "$MIG_UPDATE_PAYLOAD" 2>/dev/null \
         && log "  Updated $app_name successfully" \
         || log "  WARNING: Failed to update $app_name"
 done

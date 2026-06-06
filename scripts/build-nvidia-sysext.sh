@@ -68,11 +68,21 @@ mkdir -p "$OUT_DIR"
 # which a relative --out would point at the wrong location at squashfs time.
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
-# Build/staging dirs (large; live in /tmp for tmpfs speed on hosts that have it)
-STAGE1_DIR="/tmp/stage1"
-ROOTFS_DIR="/tmp/rootfs"
-BUILD_DIR="/tmp/nvidia_build"
-STAGING_DIR="/tmp/staging"
+# Build/staging dirs (large; kept under TMPDIR or /tmp for tmpfs speed on
+# hosts that have it). A unique mktemp -d root means parallel runs and any
+# pre-created predictable paths can't collide; it's removed on exit by the
+# trap below.
+WORK_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/nvidia-build.XXXXXX")
+cleanup_work_root() { rm -rf "$WORK_ROOT"; }
+trap cleanup_work_root EXIT
+
+STAGE1_DIR="${WORK_ROOT}/stage1"
+ROOTFS_DIR="${WORK_ROOT}/rootfs"
+BUILD_DIR="${WORK_ROOT}/nvidia_build"
+STAGING_DIR="${WORK_ROOT}/staging"
+# UPDATE_FILE keeps a fixed /tmp path on purpose: the CI workflow caches it by
+# that exact path (build-sysext.yml), so randomizing it would break the cache.
+# Overridable via --update-file=.
 UPDATE_FILE="/tmp/truenas.update"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,11 +130,11 @@ select_build_cc() {
         printf 'gcc-14\n'
     elif command -v gcc >/dev/null 2>&1 && \
          printf 'int main(void){return 0;}\n' | \
-         gcc -fmin-function-alignment=16 -x c - -o /tmp/_cc_check >/dev/null 2>&1; then
-        rm -f /tmp/_cc_check
+         gcc -fmin-function-alignment=16 -x c - -o "${WORK_ROOT}/_cc_check" >/dev/null 2>&1; then
+        rm -f "${WORK_ROOT}/_cc_check"
         printf 'gcc\n'
     else
-        rm -f /tmp/_cc_check
+        rm -f "${WORK_ROOT}/_cc_check"
         die "No GCC found that supports -fmin-function-alignment=16 (need gcc-14 or newer gcc)"
     fi
 }
@@ -292,8 +302,8 @@ systemctl stop unattended-upgrades.service 2>/dev/null || true
 
 info "Taking pre-install filesystem snapshot ..."
 find /usr /etc -xdev \( -type f -o -type l \) 2>/dev/null \
-    | LC_ALL=C sort > /tmp/fs_before.txt
-BEFORE_COUNT=$(wc -l < /tmp/fs_before.txt)
+    | LC_ALL=C sort > "${WORK_ROOT}/fs_before.txt"
+BEFORE_COUNT=$(wc -l < "${WORK_ROOT}/fs_before.txt")
 ok "Snapshot: $BEFORE_COUNT files"
 
 # Install nvidia-container-toolkit (mirrors official TrueNAS extension build)
@@ -331,9 +341,9 @@ ok "NVIDIA driver installed"
 
 info "Taking post-install snapshot ..."
 find /usr /etc -xdev \( -type f -o -type l \) 2>/dev/null \
-    | LC_ALL=C sort > /tmp/fs_after.txt
-LC_ALL=C comm -13 /tmp/fs_before.txt /tmp/fs_after.txt > /tmp/nvidia_new_files.txt
-NEW_COUNT=$(wc -l < /tmp/nvidia_new_files.txt)
+    | LC_ALL=C sort > "${WORK_ROOT}/fs_after.txt"
+LC_ALL=C comm -13 "${WORK_ROOT}/fs_before.txt" "${WORK_ROOT}/fs_after.txt" > "${WORK_ROOT}/nvidia_new_files.txt"
+NEW_COUNT=$(wc -l < "${WORK_ROOT}/nvidia_new_files.txt")
 ok "Filesystem diff: $NEW_COUNT new files"
 [ "$NEW_COUNT" -gt 0 ] || die "Installer produced zero new files — build failed"
 
@@ -348,7 +358,7 @@ awk -F/ '{
         else print "  other-usr"
     } else if ($2=="etc") print "  etc-config"
     else print "  other"
-}' /tmp/nvidia_new_files.txt | sort | uniq -c | sort -rn
+}' "${WORK_ROOT}/nvidia_new_files.txt" | sort | uniq -c | sort -rn
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 5 — Stage new files into sysext tree (remap /etc → /usr/share as needed)
@@ -400,7 +410,7 @@ while IFS= read -r src_file; do
         cp -a "$src_file" "$dest_path" 2>/dev/null || true
     fi
     STAGED_COUNT=$((STAGED_COUNT+1))
-done < /tmp/nvidia_new_files.txt
+done < "${WORK_ROOT}/nvidia_new_files.txt"
 
 ok "Staged $STAGED_COUNT files (skipped $SKIPPED_COUNT)"
 
