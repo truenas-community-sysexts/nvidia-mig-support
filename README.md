@@ -76,7 +76,7 @@ Then `sudo configure-mig` to set up your MIG layout — see [Configure MIG](#con
 
 Use `--with-driver` when TrueNAS's stock NVIDIA driver isn't recent enough for your hardware. The script downloads `nvidia-mig.raw` from the release, **builds `nvidia.raw` on your TrueNAS host** inside a transient `ubuntu:24.04` docker container, swaps the stock driver, and installs the MIG sysext alongside.
 
-Today's tracked driver is **NVIDIA 595.58.03** on TrueNAS 25.10.3.1, open kernel modules — bumped automatically by the daily `check-releases.yml` workflow when either upstream moves. To pin to a specific driver/TrueNAS combo, pass `--release=v25.10.3.1-nvidia580.126.18-r10` (driver version is parsed from the tag and fed to the build).
+Today's tracked driver is **NVIDIA 595.71.05** on TrueNAS 25.10.3.1, open kernel modules — bumped automatically by the daily `check-releases.yml` workflow when either upstream moves. To pin to a specific driver/release, pass `--release=v25.10.3.1-nvidia580.126.18-r10` (see `--help` for full flag list).
 
 On TrueNAS, as root:
 

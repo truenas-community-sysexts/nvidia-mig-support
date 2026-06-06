@@ -106,7 +106,7 @@ truenas_api_client.exc.ClientException: Failed connection handshake
 
 **Cause:** TrueNAS middleware is transitionally restarting. This happens when `systemd-sysext unmerge`/`merge` flaps the nvidia sysext — the middleware re-evaluates Docker's GPU state asynchronously and briefly disconnects clients. Also common in the first ~30 s after a fresh boot, before middleware has finished starting.
 
-**Fix (usually nothing):** The MIG service has its own retry loop and will recover (you'll see `Waiting for TrueNAS middleware (attempt N/5)` in the journal). For interactive `midclt` calls, wait 30–60 s and retry, or run:
+**Fix (usually nothing):** The MIG service has its own retry loop and will recover (you'll see `Waiting for TrueNAS middleware to be ready (system.ready); timeout=25s...` in the journal). For interactive `midclt` calls, wait 30–60 s and retry, or run:
 
 ```bash
 sudo midclt call system.ready
@@ -242,10 +242,10 @@ If `mig.conf` looks fine but the service still didn't run, see the PREINIT troub
 
 **Cause:** You changed the MIG layout (e.g. went from `14,14,14,14` to `47,47,14,14`) and the old MIG UUIDs no longer exist. The MIG service's app-remap step only remaps to the *first* available MIG UUID — apps that need a specific MIG device need to be reassigned manually.
 
-**Fix:** Re-run `configure-mig` and use the interactive app assignment walk-through:
+**Fix:** Re-run `configure-mig` (without `--skip-app-mapping`) so it walks through interactive app assignment:
 
 ```bash
-sudo configure-mig --skip-mig-conf
+sudo configure-mig
 ```
 
 Or via the TrueNAS UI: Apps → app → Edit → Resources → NVIDIA GPU → pick the right MIG UUID.
