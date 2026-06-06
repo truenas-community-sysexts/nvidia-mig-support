@@ -1071,7 +1071,17 @@ cleanup_tmp() {
             || echo "    WARN: could not restore the toggle, set it in the Apps settings" >&2
     fi
 }
-trap cleanup_tmp EXIT INT TERM
+# EXIT carries the real exit code (normal completion, a `set -e` failure, or an
+# explicit `exit N`). Signals get their own traps that exit with a conventional
+# code, so the EXIT trap runs exactly once with a non-zero rc. A combined
+# `trap cleanup_tmp EXIT INT TERM` is wrong here: on a signal bash runs the
+# handler but does NOT exit, so the script RESUMES past the interruption and the
+# handler sees rc=0 — the rollback would be skipped and the install would carry
+# on. INT/TERM are at default disposition in an interactive foreground run
+# (sudo ./install-...), so these traps install and Ctrl-C rolls back correctly.
+trap cleanup_tmp EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- Sanity-check the MIG sysext contents ---
 # Buffer the listing before grep -q — see fix/unsquashfs-grep-pipefail
@@ -1559,9 +1569,9 @@ EOF
                 [ -n "$a" ] && echo "  - $a"
             done
             echo ""
-            echo "They stay stopped until configure-mig restarts them. Running"
-            echo "configure-mig after reboot is required to bring your apps back,"
-            echo "not just to set up MIG."
+            echo "The post-reboot configure-mig re-enables the GPU toggle and"
+            echo "restarts them. Run it after rebooting to bring your apps back"
+            echo "with GPU access, not just to set up MIG."
         fi
     else
         echo "=== Install completed with errors — see FAIL lines above ==="
