@@ -1011,8 +1011,24 @@ fi
 USR_WAS_WRITABLE=0
 USR_DATASET=""
 
-# Single cleanup trap for any tempfiles we created, plus /usr readonly.
+# GPU-release rollback state (only ever set on a --with-driver run). Before the
+# driver swap, --with-driver stops every GPU-bound app and disables the docker
+# nvidia toggle to free the GPU. On a clean run those are restored later by the
+# post-reboot configure-mig. On an aborted run nothing restored them: install
+# was the only one of the four GPU scripts whose trap put /usr readonly back but
+# left the apps stopped and the toggle off. uninstall-mig-sysext.sh and
+# recover-stock-nvidia.sh already roll the toggle back in their restore_state
+# trap (PR #55); this brings install in line and also restarts the apps.
+TOGGLE_DISABLED=0       # 1 once we've written docker.update {"nvidia": false}
+ORIG_NVIDIA_TOGGLE=""   # toggle value captured before we disabled it
+STOPPED_APPS=""         # newline-separated apps we stopped, to restart on abort
+SWAP_STARTED=0          # 1 once the driver teardown (unmerge/swap) has begun
+
+# Cleanup trap: tempfiles + /usr readonly always; on abnormal exit, also undo
+# the GPU release so an aborted install doesn't leave the host with its apps
+# stopped and the nvidia toggle off.
 cleanup_tmp() {
+    rc=$?
     if [ "$USR_WAS_WRITABLE" = "1" ] && [ -n "$USR_DATASET" ]; then
         zfs set readonly=on "$USR_DATASET" 2>/dev/null || true
         USR_WAS_WRITABLE=0
@@ -1020,8 +1036,66 @@ cleanup_tmp() {
     [ -n "${MIG_TMP:-}" ] && rm -f "$MIG_TMP"
     [ -n "${DRIVER_TMP:-}" ] && rm -f "$DRIVER_TMP"
     [ -n "${PREINIT_DRY_TMP:-}" ] && rm -f "$PREINIT_DRY_TMP"
+
+    # Clean exit: the toggle-off and stopped apps are intentional. --with-driver
+    # requires a reboot, and the post-reboot configure-mig re-enables the toggle
+    # and restarts the apps. Nothing to undo.
+    [ "$rc" -eq 0 ] && return
+
+    # Died before/early in the GPU-release block, nothing was released yet.
+    [ "$TOGGLE_DISABLED" = "1" ] || [ -n "$STOPPED_APPS" ] || return
+
+    if [ "$SWAP_STARTED" = "1" ]; then
+        # The driver teardown was already in flight, so the running driver may
+        # be half-swapped. Restarting apps onto it could crash them, so point
+        # the user at the dedicated recovery path instead of guessing.
+        echo "" >&2
+        echo "ABORTED after the driver swap began. The NVIDIA driver may be in a partial state." >&2
+        echo "  Recover the stock driver (or re-run the install) before starting apps:" >&2
+        if [ -n "${SCRIPT_DIR:-}" ]; then
+            echo "    sudo ${SCRIPT_DIR}/recover-stock-nvidia.sh" >&2
+        else
+            echo "    sudo recover-stock-nvidia.sh" >&2
+        fi
+        if [ -n "$STOPPED_APPS" ]; then
+            echo "  These apps were stopped and were NOT restarted:" >&2
+            printf '%s\n' "$STOPPED_APPS" | while IFS= read -r a; do
+                [ -n "$a" ] && echo "    $a" >&2
+            done
+        fi
+        return
+    fi
+
+    # Pre-swap abort: the stock driver is still intact and merged, so fully roll
+    # the GPU release back to the host's pre-install state.
+    echo "" >&2
+    echo "Install aborted before the driver swap, rolling back GPU release..." >&2
+    if [ -n "$STOPPED_APPS" ]; then
+        printf '%s\n' "$STOPPED_APPS" | while IFS= read -r a; do
+            [ -z "$a" ] && continue
+            echo "  Restarting $a..." >&2
+            midclt call -j app.start "$a" >/dev/null 2>&1 \
+                || echo "    WARN: could not restart $a, start it from the Apps UI" >&2
+        done
+    fi
+    if [ "$TOGGLE_DISABLED" = "1" ]; then
+        want="${ORIG_NVIDIA_TOGGLE:-true}"
+        echo "  Restoring docker nvidia toggle to ${want}..." >&2
+        midclt call docker.update "{\"nvidia\": ${want}}" >/dev/null 2>&1 \
+            || echo "    WARN: could not restore the toggle, set it in the Apps settings" >&2
+    fi
 }
-trap cleanup_tmp EXIT INT TERM
+# EXIT carries the real exit code (normal completion, a `set -e` failure, or an
+# explicit `exit N`). Signals get their own traps that exit with a conventional
+# code, so the EXIT trap runs exactly once with a non-zero rc. A combined
+# `trap cleanup_tmp EXIT INT TERM` is wrong here: on a signal bash runs the
+# handler but does NOT exit, so the script RESUMES past the interruption and the
+# handler sees rc=0 — the rollback would be skipped and the install would carry
+# on. INT/TERM are at default disposition in an interactive foreground run
+# (sudo ./install-...), so these traps install and Ctrl-C rolls back correctly.
+trap cleanup_tmp EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- Sanity-check the MIG sysext contents ---
 # Buffer the listing before grep -q — see fix/unsquashfs-grep-pipefail
@@ -1148,6 +1222,16 @@ if $WITH_DRIVER; then
     echo ""
     echo "Stopping GPU-bound apps to free the GPU..."
 
+    # Capture the toggle's current value before we touch it, so an aborted
+    # install restores exactly what was there. (uninstall/recover hardcode
+    # `true`; here we keep the user's actual prior state in case they had it
+    # off, e.g. no GPU apps.)
+    if ! $DRY_RUN; then
+        ORIG_NVIDIA_TOGGLE=$(midclt call docker.config 2>/dev/null \
+            | python3 -c "import sys,json; print('true' if json.load(sys.stdin).get('nvidia') else 'false')" 2>/dev/null || true)
+        [ -n "$ORIG_NVIDIA_TOGGLE" ] || ORIG_NVIDIA_TOGGLE="true"
+    fi
+
     if $DRY_RUN; then
         echo "[dry-run] would: scan app.query for apps with use_gpu=true + a valid GPU UUID"
         echo "[dry-run] would: app.stop -j each match, then docker.update '{\"nvidia\": false}'"
@@ -1222,6 +1306,8 @@ except Exception:
                 if run_with_elapsed_capture "  Stopping $app" \
                     midclt call -j app.stop "$app"; then
                     echo "  Stopping $app... OK (${ELAPSED}s)"
+                    # Record it so an aborted install restarts what it stopped.
+                    STOPPED_APPS+="$app"$'\n'
                 else
                     echo "  Stopping $app... WARN (${ELAPSED}s): $CAPTURED_OUT"
                 fi
@@ -1230,6 +1316,7 @@ except Exception:
 
         echo ""
         echo "  Disabling nvidia toolkit for docker (belt-and-suspenders)..."
+        TOGGLE_DISABLED=1
         midclt call docker.update '{"nvidia": false}' >/dev/null \
             || echo "  WARN: docker.update returned an error — middleware may be flapping"
 
@@ -1256,6 +1343,7 @@ except Exception:
         # No nvidia-smi (shouldn't happen on a --with-driver install with
         # stock driver present, but be defensive). Fall back to toggle only.
         echo "  nvidia-smi missing; toggling docker.nvidia=false only (no drain check)"
+        TOGGLE_DISABLED=1
         midclt call docker.update '{"nvidia": false}' >/dev/null \
             || echo "  WARN: docker.update returned an error"
     fi
@@ -1264,6 +1352,12 @@ fi
 # Unmerge sysext — happens whether or not we're doing --with-driver. In
 # default mode it lets us drop in a refreshed nvidia-mig.raw symlink. In
 # --with-driver mode it's a prerequisite for swapping nvidia.raw.
+#
+# Past this point, on a --with-driver run, the nvidia sysext is being torn down
+# and the running driver is no longer trustworthy. Mark it so the abort path
+# stops trying to restart apps onto a half-swapped driver and instead points at
+# recover-stock-nvidia.sh.
+if $WITH_DRIVER && ! $DRY_RUN; then SWAP_STARTED=1; fi
 echo "Unmerging sysext..."
 if_real systemd-sysext unmerge
 
@@ -1482,6 +1576,17 @@ If you want to flip the toggle yourself before running configure-mig
   sudo midclt call docker.update '{"nvidia": true}'
   sudo midclt call docker.config | python3 -c "import sys,json; print('nvidia =', json.load(sys.stdin).get('nvidia'))"
 EOF
+        if [ -n "$STOPPED_APPS" ]; then
+            echo ""
+            echo "Apps stopped to free the GPU (still stopped now):"
+            printf '%s\n' "$STOPPED_APPS" | while IFS= read -r a; do
+                [ -n "$a" ] && echo "  - $a"
+            done
+            echo ""
+            echo "The post-reboot configure-mig re-enables the GPU toggle and"
+            echo "restarts them. Run it after rebooting to bring your apps back"
+            echo "with GPU access, not just to set up MIG."
+        fi
     else
         echo "=== Install completed with errors — see FAIL lines above ==="
         exit 1

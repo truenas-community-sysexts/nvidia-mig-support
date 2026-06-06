@@ -2,6 +2,15 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## install: aborted --with-driver now rolls back the GPU release (issue #62)
+
+A `--with-driver` install frees the GPU before swapping the driver: it stops every GPU-bound app with `app.stop` and disables the docker nvidia toggle. On a clean run those are intentionally left that way until the post-reboot `configure-mig` re-enables the toggle and restarts the apps. On an *aborted* run, nothing restored them. install's cleanup trap (`cleanup_tmp`) only put `/usr` readonly back, so an interrupted install left the host with its apps stopped and the toggle off, with no auto-recovery. install was the only one of the four GPU scripts with this gap: `uninstall-mig-sysext.sh` and `recover-stock-nvidia.sh` already restore the toggle in their `restore_state` trap (PR #55), and both uninstall and configure-mig restart the apps they stop. The toggle half was the visible symptom in issue #62; the stopped-apps half is the part that actually takes a user's Frigate/Ollama offline, and it is not self-healing by re-running install (only configure-mig restarts apps).
+
+- **Trap now undoes the GPU release on abnormal exit.** `cleanup_tmp` captures the exit code and, on a non-zero/signalled exit, restarts the apps it stopped and restores the toggle, in addition to the existing `/usr` readonly restore. A clean exit changes nothing (the toggle-off + stopped apps remain intentional, handed off to the post-reboot configure-mig).
+- **Phase-gated so it never restarts apps onto a broken driver.** A `SWAP_STARTED` flag is set the moment the driver teardown (sysext unmerge) begins. If the abort happens before that, the stock driver is still intact and the rollback is a full restore. If it happens after, the trap does not restart apps onto a possibly half-swapped driver; it prints a recovery banner pointing at `recover-stock-nvidia.sh` and lists which apps were left stopped.
+- **Toggle restored to its captured prior value, not a hardcoded `true`.** install reads `docker.config.nvidia` before disabling it and restores that exact value on abort, so a user who had the toggle off to begin with keeps it off. (uninstall/recover still hardcode `true`; this is the more correct behavior and could be backported.)
+- **Success path now names the stopped apps.** On a clean `--with-driver` finish the script lists the apps it stopped and states plainly that configure-mig restarts them after reboot, so the apps being down is not a silent surprise.
+
 ## NVIDIA driver built on the host, not redistributed (PR #59)
 
 `nvidia.raw` is no longer published as a release asset. NVIDIA's EULA prohibits us from redistributing the proprietary userspace it bundles, and the org's no-binary-redistribution policy (profile/README.md) says we shouldn't. The previous `--with-driver` flow downloaded a `nvidia.raw` we attached to every release — that violated both. The driver is now **built on the user's TrueNAS host**, where the operator accepts NVIDIA's EULA themselves.
