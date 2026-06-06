@@ -50,6 +50,7 @@ The release tag encodes the recommended driver + TrueNAS combo (e.g. `v25.10.3.1
 - TrueNAS SCALE 25.10 or later (older versions ship pre-570.x drivers, which we don't validate)
 - An NVIDIA GPU that supports MIG (RTX PRO 6000 Blackwell confirmed)
 - Workstation Edition cards: a one-time `displaymodeselector` switch into compute mode (see [docs/architecture.md](docs/architecture.md#workstation-edition-one-time-setup))
+- `--with-driver` only: a working Docker daemon on the host (the driver is built inside a transient `ubuntu:24.04` container). TrueNAS Apps users already have it; on a headless box with Apps disabled the install script starts Docker for the build and restores its prior state on exit.
 
 ## Install — default (MIG on stock driver)
 
@@ -177,12 +178,13 @@ sudo uninstall-nvidia-mig
 ```
 
 - **If only the MIG layer is installed** (default `install-mig-sysext.sh`): removes the symlink, re-merges sysext, deregisters the MIG PREINIT. Driver untouched. **No reboot needed.**
-- **If MIG + custom driver is installed** (`--with-driver` path): also stops app services, drains the GPU, restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters the driver PREINIT. **Reboot required** afterwards (and the same 5–10 min Apps-toggle wait — see the post-uninstall banner the script prints).
+- **If MIG + custom driver is installed** (`--with-driver` path): also stops app services, drains the GPU, restores stock `nvidia.raw` from `nvidia-original.raw`, deregisters the driver PREINIT. By default it also removes the build-on-host artifacts (`build/`, `scripts/`, and the ~2 GB `cache/`), keeping only `nvidia-original.raw` for recovery. **Reboot required** afterwards (and the same 5–10 min Apps-toggle wait — see the post-uninstall banner the script prints).
 - **If neither is installed**: prints "nothing to uninstall" and exits cleanly.
 
 Flags:
 
-- `--keep-persist` — don't wipe `/mnt/<pool>/.config/nvidia-gpu/` contents
+- `--keep-cache` — preserve the `cache/` dir (~2 GB of TrueNAS `.update` + NVIDIA `.run` downloads) for a faster reinstall, but still clean `nvidia.raw`, the staged build helpers, and the PREINIT entry
+- `--keep-persist` — don't wipe `/mnt/<pool>/.config/nvidia-gpu/` contents at all
 - `--skip-backup-check` — allow the driver revert without an `nvidia-original.raw` backup (at your own risk — you won't be able to recover stock later)
 
 **Fallback** — if the sysext isn't currently merged (e.g. corrupted, or you're recovering a host that lost its `/etc/extensions/` symlink), curl-bash still works:
