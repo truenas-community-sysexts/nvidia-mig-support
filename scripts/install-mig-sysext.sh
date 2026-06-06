@@ -991,13 +991,23 @@ if $WITH_DRIVER; then
     fi
 fi
 
-# Single cleanup trap for any tempfiles we created.
+# Track /usr writable state so the trap can put it back. Without this, a
+# failure under set -e (or a SIGTERM) between `zfs set readonly=off` and the
+# matching readonly=on would leave /usr writable until the next reboot.
+USR_WAS_WRITABLE=0
+USR_DATASET=""
+
+# Single cleanup trap for any tempfiles we created, plus /usr readonly.
 cleanup_tmp() {
+    if [ "$USR_WAS_WRITABLE" = "1" ] && [ -n "$USR_DATASET" ]; then
+        zfs set readonly=on "$USR_DATASET" 2>/dev/null || true
+        USR_WAS_WRITABLE=0
+    fi
     [ -n "${MIG_TMP:-}" ] && rm -f "$MIG_TMP"
     [ -n "${DRIVER_TMP:-}" ] && rm -f "$DRIVER_TMP"
     [ -n "${PREINIT_DRY_TMP:-}" ] && rm -f "$PREINIT_DRY_TMP"
 }
-trap cleanup_tmp EXIT
+trap cleanup_tmp EXIT INT TERM
 
 # --- Sanity-check the MIG sysext contents ---
 # Buffer the listing before grep -q — see fix/unsquashfs-grep-pipefail
@@ -1245,8 +1255,13 @@ if_real systemd-sysext unmerge
 
 if $WITH_DRIVER; then
     USR_DATASET=$(zfs list -H -o name /usr 2>/dev/null)
-    echo "Setting ${USR_DATASET:-<unknown>} writable..."
+    if [ -z "$USR_DATASET" ]; then
+        echo "ERROR: could not determine the ZFS dataset for /usr; aborting before driver swap" >&2
+        exit 1
+    fi
+    echo "Setting ${USR_DATASET} writable..."
     if_real zfs set readonly=off "$USR_DATASET"
+    $DRY_RUN || USR_WAS_WRITABLE=1
 
     # Stash current (likely stock) as .bak unless we already have one.
     if $DRY_RUN; then
@@ -1261,6 +1276,7 @@ if $WITH_DRIVER; then
     $DRY_RUN || echo "Installed custom nvidia.raw at $LIVE_NVIDIA"
 
     if_real zfs set readonly=on "$USR_DATASET"
+    $DRY_RUN || USR_WAS_WRITABLE=0
 fi
 
 # Ensure /etc/extensions/ symlinks for both sysexts. nvidia.raw is always
