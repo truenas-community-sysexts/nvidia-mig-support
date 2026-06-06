@@ -877,6 +877,20 @@ if ! $WITH_DRIVER; then
 fi
 
 # --- Resolve persist dir + ensure it exists ---
+# Validate --persist-path shape: the boot-time PREINIT (nvidia-preinit-driver.sh)
+# only scans /mnt/*/.config/nvidia-gpu, so any other location silently breaks
+# persistence after a reboot or TrueNAS update. Refuse early. --pool resolves
+# to this shape automatically.
+if [ -n "$PERSIST_PATH" ]; then
+    PERSIST_PATH_REAL=$(realpath -m "$PERSIST_PATH" 2>/dev/null || echo "$PERSIST_PATH")
+    if [[ ! "$PERSIST_PATH_REAL" =~ ^/mnt/[^/]+/\.config/nvidia-gpu/?$ ]]; then
+        echo "ERROR: --persist-path must be /mnt/<pool>/.config/nvidia-gpu (got: ${PERSIST_PATH})" >&2
+        echo "  The boot-time PREINIT script only scans /mnt/*/.config/nvidia-gpu," >&2
+        echo "  so any other location silently breaks persistence after a reboot or update." >&2
+        echo "  Pass --pool=<name> instead (it resolves to /mnt/<name>/.config/nvidia-gpu)." >&2
+        exit 2
+    fi
+fi
 resolve_persist_dir || exit 1
 if_real mkdir -p "$PERSIST_DIR"
 
