@@ -32,20 +32,27 @@
 #
 # Usage:
 #   sudo ./uninstall-mig-sysext.sh                     # auto-detect + undo
-#   sudo ./uninstall-mig-sysext.sh --keep-persist      # don't remove files
+#   sudo ./uninstall-mig-sysext.sh --keep-persist      # don't remove anything
 #                                                       from /mnt/<pool>/.config/nvidia-gpu/
+#   sudo ./uninstall-mig-sysext.sh --keep-cache        # remove most persist
+#                                                       files but retain the
+#                                                       ~2 GB build cache (TrueNAS
+#                                                       .update + NVIDIA .run)
+#                                                       for a fast re-install
 #   sudo ./uninstall-mig-sysext.sh --skip-backup-check # allow driver revert
 #                                                       without nvidia-original.raw
 
 set -euo pipefail
 
 KEEP_PERSIST=false
+KEEP_CACHE=false
 SKIP_BACKUP_CHECK=false
 for arg in "$@"; do
     case "$arg" in
         --keep-persist) KEEP_PERSIST=true ;;
+        --keep-cache) KEEP_CACHE=true ;;
         --skip-backup-check) SKIP_BACKUP_CHECK=true ;;
-        -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
@@ -524,13 +531,29 @@ fi
 # ─────────────────────────────────────────────────────────────────────────
 # Cleanup persistent storage. nvidia-original.raw is always kept — it's
 # expensive to re-fetch and the user may want to re-install later.
+#
+# Build-on-host artifacts (build/, scripts/, cache/) only exist if the
+# user ever did --with-driver. cache/ alone is ~2 GB (TrueNAS .update +
+# NVIDIA .run); --keep-cache preserves it for a fast re-install while
+# still removing every other persist file.
 # ─────────────────────────────────────────────────────────────────────────
 if ! $KEEP_PERSIST && [ -n "$PERSIST_DIR" ]; then
     if $HAS_DRIVER; then
         rm -f "$PERSIST_DIR/nvidia.raw" \
               "$PERSIST_DIR/nvidia-preinit-driver.sh" \
               "$PERSIST_DIR/nvidia-preinit-full.sh"
-        echo "Removed custom nvidia.raw and driver PREINIT helper from $PERSIST_DIR"
+        rm -rf "$PERSIST_DIR/build" "$PERSIST_DIR/scripts"
+        echo "Removed custom nvidia.raw, driver PREINIT helper, and build/scripts/ from $PERSIST_DIR"
+
+        if [ -d "$PERSIST_DIR/cache" ]; then
+            if $KEEP_CACHE; then
+                cache_sz=$(du -sh "$PERSIST_DIR/cache" 2>/dev/null | cut -f1 || echo "?")
+                echo "  ($PERSIST_DIR/cache retained: ${cache_sz} — --keep-cache)"
+            else
+                rm -rf "$PERSIST_DIR/cache"
+                echo "Removed $PERSIST_DIR/cache (pass --keep-cache next time to skip re-download on re-install)"
+            fi
+        fi
     fi
     if $HAS_MIG; then
         rm -f "$PERSIST_DIR/nvidia-mig.raw" \

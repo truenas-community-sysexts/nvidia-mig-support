@@ -398,12 +398,12 @@ jobs:
     needs: [resolve, build-nvidia, build-mig]
     runs-on: ubuntu-latest
     steps:
-      - name: Download nvidia.raw artifact
-        uses: actions/download-artifact@v6
-        with:
-          name: nvidia-raw
-          path: dist
-
+      # nvidia.raw is intentionally NOT downloaded for publish — NVIDIA's
+      # EULA prohibits us redistributing the proprietary userspace contained
+      # in it (see README License section). The build-nvidia job's smoke
+      # test is still gated on (`needs:` above) so a broken driver build
+      # blocks the release. The artifact remains available via the workflow
+      # run page for 30 days for human inspection.
       - name: Download nvidia-mig.raw artifact
         uses: actions/download-artifact@v6
         with:
@@ -413,7 +413,6 @@ jobs:
       - name: List release assets
         run: |
           ls -la dist/
-          echo "nvidia.raw     SHA256: $(cat dist/nvidia.raw.sha256)"
           echo "nvidia-mig.raw SHA256: $(cat dist/nvidia-mig.raw.sha256)"
 
       - name: Write release notes
@@ -425,21 +424,25 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           cat > release-notes.md <<EOF
-          Enables Nvidia MIG support and container mapping for MIGs. Optionally use later Nvidia drivers than the stock TrueNAS version if needed for hardware compatibility.
+          Enables Nvidia MIG support and container mapping for MIGs. Optionally build + install a later Nvidia driver than the stock TrueNAS version if needed for hardware compatibility — the driver sysext is assembled on your TrueNAS host (we don't redistribute NVIDIA's proprietary userspace).
 
-          The install script picks the right asset based on the flag you pass:
+          Two install variants from one one-liner:
 
-          - \`install-mig-sysext.sh\` (default) → installs \`nvidia-mig.raw\` on top of TrueNAS's stock driver. No reboot.
-          - \`install-mig-sysext.sh --with-driver\` → installs \`nvidia.raw\` and \`nvidia-mig.raw\` (driver swap, requires reboot).
+          - \`install-mig-sysext.sh\` (default) → installs \`nvidia-mig.raw\` on top of TrueNAS's stock driver. No reboot, no build.
+          - \`install-mig-sysext.sh --with-driver\` → also builds \`nvidia.raw\` on this host inside a transient \`ubuntu:24.04\` docker container (≈ 8 min first run; cached for subsequent installs). Requires reboot.
+
+          The release tag pins the recommended NVIDIA driver + TrueNAS version combo this release was tested against; the install script parses both out of the tag and feeds them to the on-host build.
 
           - TrueNAS:          \`${TRUENAS_VERSION}\`
-          - Optional Driver:  \`${NVIDIA_VERSION}\` (${KERNEL_MODULE_TYPE} module)
+          - Pinned Driver:    \`${NVIDIA_VERSION}\` (${KERNEL_MODULE_TYPE} module)
           - Run number:       ${RUN_NUMBER}
           - Source commit: \`${COMMIT_SHA}\`
 
           MIG Only: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash\`
 
           MIG+Driver: \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash -s -- --with-driver\`
+
+          By running \`--with-driver\` you accept the NVIDIA driver EULA on your own behalf — the build script invokes the official \`.run\` installer with \`--accept-license --silent\`.
           EOF
 
       - name: Publish release
@@ -449,8 +452,6 @@ jobs:
           name: "TrueNAS ${{ needs.resolve.outputs.truenas_version }} - NVIDIA ${{ needs.resolve.outputs.nvidia_version }} (r${{ github.run_number }})"
           body_path: release-notes.md
           files: |
-            dist/nvidia.raw
-            dist/nvidia.raw.sha256
             dist/nvidia-mig.raw
             dist/nvidia-mig.raw.sha256
           draft: false
@@ -532,15 +533,19 @@ jobs:
                 `- [ ] Assign a MIG profile to a TrueNAS app; \`nvidia-smi -L\` inside the app shows the expected slice.`,
                 `- [ ] Reboot and confirm MIG instances are recreated by the registered PREINIT.`,
                 ``,
-                `### Variant B — --with-driver install (custom driver + MIG)`,
+                `### Variant B — --with-driver install (build driver on host + MIG)`,
                 `- [ ] Pre-flight: stock-nvidia backup exists (\`/mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw\`); run \`recover-stock-nvidia.sh\` if not.`,
+                `- [ ] Pre-flight: docker daemon is present (TrueNAS Apps users already have it; headless-no-Apps boxes: install script starts it for the build, restores prior state on exit).`,
                 `- [ ] \`sudo bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/main/scripts/install-mig-sysext.sh)" -- --release=${tag} --with-driver\``,
+                `- [ ] First run takes ≈ 8 min — install script pulls \`ubuntu:24.04\`, builds \`nvidia.raw\` against the running kernel inside the container, caches \`.update\` + \`.run\` to \`/mnt/<pool>/.config/nvidia-gpu/cache/\`.`,
                 `- [ ] Reboot when the install script prompts.`,
                 `- [ ] \`nvidia-smi\` reports the new driver version with no NVML mismatch errors.`,
                 `- [ ] \`systemd-sysext status\` shows \`nvidia\` (custom) and \`nvidia-mig\` merged.`,
                 `- [ ] \`midclt call initshutdownscript.query\` shows BOTH PREINITs (nvidia-preinit-driver and nvidia-mig-setup).`,
                 `- [ ] \`configure-mig\` runs without errors and assigns a profile to an app.`,
                 `- [ ] Reboot once more and confirm everything still works (both PREINITs re-apply).`,
+                `- [ ] Re-run the install one-liner — should detect the cached \`nvidia.raw\` is valid for the running kernel + target driver and skip the rebuild (completes in ≈ 10 s).`,
+                `- [ ] Re-run with \`--rebuild\` — should ignore the cache and rebuild from scratch (~3 min on warm cache, since \`.update\` + \`.run\` are kept).`,
                 ``,
                 `### Promote`,
                 `Once verified, open the [release page](${releaseUrl}) and click **Set as latest**, then close this issue.`,
