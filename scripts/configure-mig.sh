@@ -963,7 +963,16 @@ except: print('')" 2>/dev/null)
         fi
     fi
 
-    payload="{\"values\":{\"resources\":{\"gpus\":{\"use_all_gpus\":false,\"nvidia_gpu_selection\":{\"$PCI_SLOT\":{\"use_gpu\":true,\"uuid\":\"${STAGED_UUID[$i]}\"}}}}}}"
+    # Build the payload with python3 (slot and uuid passed as argv) instead of
+    # interpolating into a JSON string literal, to avoid quoting/escaping bugs.
+    payload=$(python3 -c '
+import json, sys
+slot, uuid = sys.argv[1], sys.argv[2]
+print(json.dumps({"values": {"resources": {"gpus": {
+    "use_all_gpus": False,
+    "nvidia_gpu_selection": {slot: {"use_gpu": True, "uuid": uuid}},
+}}}}))
+' "$PCI_SLOT" "${STAGED_UUID[$i]}")
     if run_with_elapsed_capture "    Applying GPU config" midclt call -j app.update "$app" "$payload"; then
         echo "    Applying GPU config... OK (${ELAPSED}s)"
     else
