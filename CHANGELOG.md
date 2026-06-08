@@ -2,6 +2,19 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## MIG-only: the driver path moved to nvidia-driver-support
+
+This repo now does exactly one thing: build and install `nvidia-mig.raw` on top of whatever NVIDIA driver is already present. The entire driver side — the `--with-driver` install mode, the on-host `nvidia.raw` build, stock-driver recovery, the driver PREINIT, and the daily upstream-version poller — has been removed. To run a newer/specific/legacy driver, use the separate [nvidia-driver-support](https://github.com/truenas-community-sysexts/nvidia-driver-support) project first, then install MIG on top.
+
+- **`install-mig-sysext.sh` is MIG-only.** Dropped `--with-driver`, `--driver-sysext`, `--custom-run`, `--rebuild`, `--kmod`, and `--skip-backup-check`, plus all the build/cache/stage/driver-swap machinery. It now: pre-flights the running driver, fetches `nvidia-mig.raw`, symlinks + merges it, and registers the MIG PREINIT. No reboot. Release resolution simplified to the repo's latest release (or `--release=TAG`) via the `releases/latest/download` URL — no more TrueNAS-version tag matching.
+- **MIG-support gate reframed.** The driver must be major **≥ 570** (the driver shipped in the latest TrueNAS 25). Below that, install refuses unless `--force` — worded as "MIG unsupported; install a newer driver via nvidia-driver-support" rather than the old "use --with-driver".
+- **`uninstall-mig-sysext.sh` is MIG-only.** Removed the driver-revert path (stock restore, `/usr` readonly toggle, driver PREINIT deregistration, `--keep-cache`/`--skip-backup-check`). It still tears down MIG runtime state (instances, mode, app reassignment) and removes the MIG sysext + PREINIT. The driver is never touched; no reboot.
+- **Deleted** `build-nvidia-sysext.sh`, `build-on-host.sh`, `recover-stock-nvidia.sh`, `nvidia-preinit-driver.sh`.
+- **CI: `build-sysext.yml` is MIG-only**, manual-dispatch, tag `v<run_number>`, publishes `nvidia-mig.raw` as the sole asset. Removed the `build-nvidia` job, the `resolve` version-logic job, `workflow_call`, and the hardware-test issue flow. **Deleted** `check-releases.yml`, `.github/tracked-versions.json`, and `validate-tracked-versions.sh`; trimmed `lint.yml` accordingly.
+- **Docs** rewritten MIG-only across README and `docs/`, pointing at nvidia-driver-support for the driver.
+
+> Migration: an existing `--with-driver` install isn't auto-reverted by the new uninstall. Use nvidia-driver-support's tooling to manage/revert the driver; this repo's uninstall only removes the MIG layer.
+
 ## install: aborted --with-driver now rolls back the GPU release (issue #62)
 
 A `--with-driver` install frees the GPU before swapping the driver: it stops every GPU-bound app with `app.stop` and disables the docker nvidia toggle. On a clean run those are intentionally left that way until the post-reboot `configure-mig` re-enables the toggle and restarts the apps. On an *aborted* run, nothing restored them. install's cleanup trap (`cleanup_tmp`) only put `/usr` readonly back, so an interrupted install left the host with its apps stopped and the toggle off, with no auto-recovery. install was the only one of the four GPU scripts with this gap: `uninstall-mig-sysext.sh` and `recover-stock-nvidia.sh` already restore the toggle in their `restore_state` trap (PR #55), and both uninstall and configure-mig restart the apps they stop. The toggle half was the visible symptom in issue #62; the stopped-apps half is the part that actually takes a user's Frigate/Ollama offline, and it is not self-healing by re-running install (only configure-mig restarts apps).

@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Configure MIG layout + map MIG devices to TrueNAS apps.
 #
-# Runs after install-mig-sysext.sh (default path: no reboot) or after the
-# reboot following install-mig-sysext.sh --with-driver. Either path is fine —
-# by the time configure-mig.sh runs, /usr/bin/nvidia-smi must work and
-# middleware must be up.
+# Runs after install-mig-sysext.sh (no reboot needed). By the time
+# configure-mig.sh runs, /usr/bin/nvidia-smi must work and middleware must
+# be up.
 #
 # Usage:
 #   sudo ./configure-mig.sh                        # interactive: prompt for profiles
@@ -226,7 +225,7 @@ profile_label_from_name() {
 
 # --- Resolve persistent dir ---
 # resolve_persist_dir is duplicated verbatim across install-mig-sysext.sh,
-# configure-mig.sh, and recover-stock-nvidia.sh. Inline (rather than
+# configure-mig.sh, and uninstall-mig-sysext.sh. Inline (rather than
 # sourced from a sibling file) so each script remains a self-contained
 # curl|bash artifact. Keep these copies in sync when changing the function.
 resolve_persist_dir() {
@@ -303,16 +302,16 @@ resolve_persist_dir() {
         echo "  Invalid. Enter 1-${#choices[@]}."
     done
 }
-# Validate --persist-path shape: the boot-time PREINIT (nvidia-preinit-driver.sh)
-# only scans /mnt/*/.config/nvidia-gpu, so any other location silently breaks
-# persistence after a reboot or TrueNAS update. Refuse early. --pool resolves
-# to this shape automatically.
+# Validate --persist-path shape: MIG persistence only scans
+# /mnt/*/.config/nvidia-gpu, so any other location silently breaks it after a
+# reboot or TrueNAS update. Refuse early. --pool resolves to this shape
+# automatically.
 if [ -n "$PERSIST_PATH" ]; then
     PERSIST_PATH_REAL=$(realpath -m "$PERSIST_PATH" 2>/dev/null || echo "$PERSIST_PATH")
     if [[ ! "$PERSIST_PATH_REAL" =~ ^/mnt/[^/]+/\.config/nvidia-gpu/?$ ]]; then
         echo "ERROR: --persist-path must be /mnt/<pool>/.config/nvidia-gpu (got: ${PERSIST_PATH})" >&2
-        echo "  The boot-time PREINIT script only scans /mnt/*/.config/nvidia-gpu," >&2
-        echo "  so any other location silently breaks persistence after a reboot or update." >&2
+        echo "  MIG persistence only scans /mnt/*/.config/nvidia-gpu," >&2
+        echo "  so any other location silently breaks it after a reboot or update." >&2
         echo "  Pass --pool=<name> instead (it resolves to /mnt/<name>/.config/nvidia-gpu)." >&2
         exit 2
     fi
@@ -341,8 +340,9 @@ else
     if echo "$NVIDIA_ERR" | grep -qi "version mismatch"; then
         echo "" >&2
         echo "ERROR: kernel modules and userspace libraries are different driver versions." >&2
-        echo "       This is expected immediately after 'install-mig-sysext.sh --with-driver'" >&2
-        echo "       and resolves itself after a reboot loads matching kernel modules." >&2
+        echo "       This happens right after a driver swap (e.g. installing a driver via" >&2
+        echo "       nvidia-driver-support) and resolves itself after a reboot loads" >&2
+        echo "       matching kernel modules." >&2
         echo "" >&2
         echo "       Reboot first, then re-run configure-mig:" >&2
         echo "" >&2
