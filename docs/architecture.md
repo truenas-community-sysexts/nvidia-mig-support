@@ -60,7 +60,8 @@ The GPU sees one merged userspace via `systemd-sysext`. Multiple `.raw` extensio
               ├─ /usr/bin/nvidia-mig-setup          (boot-time creator)
               ├─ /usr/bin/configure-mig             (interactive setup)
               ├─ /usr/bin/uninstall-nvidia-mig      (teardown)
-              └─ /usr/lib/systemd/system/nvidia-mig-setup.service
+              ├─ /usr/lib/systemd/system/nvidia-mig-setup.service
+              │                                     (Before=docker.service)
               └─ /usr/lib/extension-release.d/extension-release.nvidia-mig  (ID=_any)
 ```
 
@@ -90,10 +91,14 @@ The working pattern is TrueNAS's middleware-driven PREINIT mechanism:
                        │
                        ▼
               docker.service starts
-              (containers can now claim MIG UUIDs)
+              (ordered after nvidia-mig-setup.service via
+               its Before=docker.service — instances exist,
+               so containers claim MIG UUIDs cleanly)
 ```
 
 `nvidia-mig-setup.service` is `Type=oneshot RemainAfterExit=yes` — once started this boot, `systemctl start` is a no-op. `configure-mig` uses `systemctl restart` when it needs to re-apply a new `mig.conf`.
+
+The PREINIT starts the MIG service early, but the **ordering that actually prevents the boot race** is `Before=docker.service` declared in `nvidia-mig-setup.service` (the same convention the sibling `hailo-load.service` / `coral-load.service` use). Without it, dockerd starts in parallel and its `restart=unless-stopped` policy recreates GPU/MIG containers *before* the instances exist — they crash at task creation with `failed to get device handle from UUID: Not Found`. MIG instances do **not** survive a reboot, so this race is hit on every boot, not just driver swaps. It's deadlock-safe: `nvidia-mig-setup` creates the instances before its bounded (25 s) middleware wait and never blocks boot, so it always exits and releases docker. See [troubleshooting.md](troubleshooting.md) and [mig-persistence.md](mig-persistence.md).
 
 The driver's own persistence (surviving a TrueNAS update that wipes `/usr`) is handled by nvidia-driver-support's PREINIT when a custom driver is installed; the stock driver needs none. Either way it's independent of the MIG PREINIT — `nvidia-mig-setup` waits for the driver to become responsive (`nvidia-smi -L` succeeds), so firing order doesn't matter.
 

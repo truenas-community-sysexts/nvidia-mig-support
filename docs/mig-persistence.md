@@ -60,15 +60,27 @@ Pool auto-detected as the first non-`boot-pool` from `zpool list`. Override with
 ```text
 1. Kernel boots, modules load (driver from nvidia.raw — stock or custom)
 2. systemd-sysext merges nvidia.raw + nvidia-mig.raw + hailo.raw
-3. systemctl daemon-reload picks up nvidia-mig-setup.service unit
+3. systemctl daemon-reload picks up nvidia-mig-setup.service
+   (which declares Before=docker.service)
 4. TrueNAS middleware starts
 5. PREINIT entry runs: systemctl start nvidia-mig-setup.service
 6. nvidia-mig-setup polls until `nvidia-smi -L` succeeds, reads mig.conf
 7. MIG mode enable + instance creation + app remap (if needed)
-8. docker.service starts → containers can claim MIG UUIDs
+8. docker.service starts (ordered after nvidia-mig-setup.service) →
+   instances exist, so containers claim MIG UUIDs cleanly
 ```
 
 Total nvidia-mig-setup runtime: typically ~45 s (most of it the middleware-ready poll).
+
+### Why docker.service is ordered after MIG setup
+
+Step 8 is **not** incidental ordering — it's enforced by `Before=docker.service` in `nvidia-mig-setup.service` (the same convention the sibling `hailo-load.service` / `coral-load.service` use). MIG instances don't survive a reboot (table above), and TrueNAS apps default to `restart=unless-stopped`, so dockerd would otherwise restart GPU/MIG containers in parallel with — and typically *before* — instance creation at step 7. A container that restarts before its MIG device exists crashes at task creation (`failed to get device handle from UUID: Not Found`). The ordering makes dockerd wait, so the `unless-stopped` restart lands on devices that already exist.
+
+**Tradeoff:** because docker now waits for the whole `nvidia-mig-setup.service` to exit — including its bounded (≤25 s) middleware-ready poll — *all* app startup (GPU or not) is delayed until MIG setup finishes, typically adding tens of seconds to boot. A future optimization is to split instance creation (no middleware dependency) from app remap and gate docker on only the former; for now correctness is preferred over boot speed.
+
+**Deadlock-safe:** instance creation (step 7's first half) happens *before* the middleware poll, and the poll times out and proceeds rather than blocking. So even if middleware readiness transitively depended on docker, `nvidia-mig-setup` still exits and releases docker.
+
+**Why the sysext-delivered ordering is loaded before docker (not too late):** `systemd-sysext.service` is guaranteed to finish before `basic.target` (per `systemd-sysext(8)`), so the merged `nvidia-mig-setup.service` is present before any regular service initializes. `EXTENSION_RELOAD_MANAGER=1` (set in the sysext's `extension-release`) reloads PID 1 after the merge, so the `Before=docker.service` edge is registered. `docker.service` is a regular, `DefaultDependencies=yes` service ordered after `basic.target`, so it starts only once both have happened — the ordering is in effect every boot, with no `/etc` copy required. (This is proven in production by the sibling `hailo-load.service` / `coral-load.service`, which appear in `docker.service`'s resolved `After=` via the identical mechanism.)
 
 ## Uninstall
 
