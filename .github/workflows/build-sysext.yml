@@ -98,7 +98,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ github.run_number }}
-          name: "nvidia-mig sysext v${{ github.run_number }}"
+          name: "Nvidia Mig Support v${{ github.run_number }}"
           body_path: release-notes.md
           files: |
             dist/nvidia-mig.raw
