@@ -51,6 +51,9 @@ chmod 0644 "${STAGE}/usr/lib/systemd/system/nvidia-mig-setup.service"
 
 # No multi-user.target.wants symlink — boot activation is via a TrueNAS
 # PREINIT entry registered by install-mig-sysext.sh, not via WantedBy.
+# nvidia-mig-setup.service declares Before=docker.service so dockerd waits for
+# MIG instance creation before restarting GPU/MIG containers (same convention
+# as hailo-load.service / coral-load.service) — no separate docker drop-in.
 
 if [ -n "$DMS_PATH" ]; then
     [ -f "$DMS_PATH" ] || { echo "displaymodeselector not found: $DMS_PATH" >&2; exit 1; }

@@ -4,6 +4,34 @@ Common failure modes and what to do about them. For background on how each piece
 
 This repo handles only the MIG layer. Driver problems (building, swapping, surviving updates) belong to [nvidia-driver-support](https://github.com/truenas-community-sysexts/nvidia-driver-support).
 
+## GPU/MIG apps are `CRASHED` after every reboot (`failed to get device handle from UUID: Not Found`)
+
+**Symptom:** after a reboot, non-GPU apps come back fine but every app assigned a MIG device is `CRASHED`. `docker inspect` on the container shows:
+
+```text
+err=failed to create task for container: ... failed to create the automatic CDI modifier:
+    failed to generate CDI spec for mode "auto": failed to construct device spec generators:
+    failed to get device handle from UUID: Not Found: unknown
+```
+
+The MIG UUIDs in `nvidia-smi -L` match the apps' saved assignments exactly — so this is **not** a stale-UUID problem.
+
+**Cause:** a boot race. MIG instances don't survive a reboot; `nvidia-mig-setup` recreates them each boot. TrueNAS apps default to `restart=unless-stopped`, so dockerd restarts the GPU containers the moment it starts — and if `docker.service` comes up before `nvidia-mig-setup` has created the instances, the container's MIG device doesn't exist yet and it crashes at task creation. Because the instances are gone on every boot, this hits **every** reboot, not just driver swaps.
+
+**Fix:** `nvidia-mig-setup.service` declares `Before=docker.service` (the same convention the sibling hailo/coral sysexts use), so dockerd waits for MIG instance creation before restarting the GPU containers. If you're crashing on boot, your installed `nvidia-mig.raw` predates this fix — update and re-run the install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash
+```
+
+Verify the ordering is in effect (should list `nvidia-mig-setup.service`):
+
+```bash
+systemctl show docker.service -p After | tr ' ' '\n' | grep nvidia-mig-setup
+```
+
+`install … --check` also reports this as a pass/fail line. To recover already-crashed apps without rebooting: `sudo midclt call -j app.redeploy <app>` once the instances exist (`nvidia-smi -L` shows them).
+
 ## `Failed to initialize NVML: Driver/library version mismatch`
 
 ```text

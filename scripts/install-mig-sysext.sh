@@ -351,6 +351,23 @@ except Exception:
             "nvidia-mig.raw may not be currently merged"
     fi
 
+    # docker.service ordering: nvidia-mig-setup.service declares
+    # Before=docker.service so dockerd waits for MIG instance creation before the
+    # unless-stopped restart of GPU/MIG containers — otherwise they crash on boot
+    # with "device handle from UUID: Not Found". Query the loaded docker config
+    # (the Before= edge surfaces symmetrically as docker.service's After=).
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl show docker.service -p After 2>/dev/null | grep -q 'nvidia-mig-setup.service'; then
+            record_pass "docker.service ordered after nvidia-mig-setup.service (GPU apps wait for MIG instances)"
+        elif grep -qs 'Before=docker.service' /usr/lib/systemd/system/nvidia-mig-setup.service; then
+            record_warn "nvidia-mig-setup.service declares Before=docker.service but it's not loaded yet" \
+                "run 'sudo systemctl daemon-reload' (applied automatically on next boot)"
+        else
+            record_fail "docker.service not ordered after nvidia-mig-setup.service" \
+                "GPU/MIG apps may crash on boot (UUID Not Found) — update nvidia-mig.raw and re-run install"
+        fi
+    fi
+
     # Apps' NVIDIA toggle (docker.config.nvidia). Empirically the apps
     # subsystem doesn't accept this toggle for some time after boot —
     # we don't know why, but it typically resolves within ~10 min.
