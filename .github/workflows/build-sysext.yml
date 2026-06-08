@@ -12,9 +12,19 @@ name: Build Sysext
 
 on:
   workflow_dispatch:
+    inputs:
+      mark_latest:
+        description: 'true = publish straight to Latest; false (default) = prerelease + hardware-test gate'
+        required: false
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'false'
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: build-sysext-${{ github.ref }}
@@ -104,7 +114,49 @@ jobs:
             dist/nvidia-mig.raw
             dist/nvidia-mig.raw.sha256
           draft: false
-          prerelease: false
-          make_latest: true
+          # Default (mark_latest=false): publish a prerelease gated behind a
+          # hardware-test issue. Override mark_latest=true to publish straight
+          # to Latest. Promotion of a prerelease happens via promote.yml when
+          # the hardware-test issue is closed.
+          prerelease: ${{ inputs.mark_latest != 'true' }}
+          make_latest: ${{ inputs.mark_latest == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Open hardware-test issue (prerelease gate)
+        if: inputs.mark_latest != 'true'
+        uses: actions/github-script@v9
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        with:
+          script: |
+            const tag = `v${process.env.RUN_NUMBER}`;
+            const { owner, repo } = context.repo;
+            const releaseUrl = `https://github.com/${owner}/${repo}/releases/tag/${tag}`;
+            const title = `Hardware test: nvidia-mig ${tag}`;
+            try {
+              await github.rest.issues.createLabel({ owner, repo, name: 'hardware-test',
+                color: 'FBCA04', description: 'Build awaiting verification on real hardware' });
+            } catch (e) { if (e.status !== 422) throw e; }
+            const existing = await github.rest.issues.listForRepo({ owner, repo,
+              state: 'open', labels: 'hardware-test', per_page: 100 });
+            if (existing.data.some(i => i.title.includes(tag))) {
+              console.log(`Open hardware-test issue already exists for ${tag}, skipping`); return;
+            }
+            await github.rest.issues.create({ owner, repo, title, labels: ['hardware-test'],
+              body: [
+                `A new prerelease of the MIG tooling sysext needs verification before promotion to **Latest**.`,
+                ``,
+                `**Release:** [${tag}](${releaseUrl})`,
+                `<!-- release-tag: ${tag} -->`,
+                ``,
+                `### Test checklist`,
+                `- [ ] Install on a TrueNAS box with an NVIDIA GPU + driver (major >= 570)`,
+                `- [ ] \`systemctl status nvidia-mig-setup\` is active`,
+                `- [ ] MIG profiles can be listed/configured (\`nvidia-smi mig -lgip\`)`,
+                `- [ ] A MIG device maps into an app/container as expected`,
+                ``,
+                `### Promote`,
+                `This build is published as a **pre-release**. Once verified, **close this issue as completed** — that automatically promotes [\`${tag}\`](${releaseUrl}) to the latest release and appends the changelog.`,
+              ].join('\n') });
+            console.log(`Created hardware-test issue for ${tag}`);
