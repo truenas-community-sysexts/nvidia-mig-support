@@ -104,7 +104,11 @@ jobs:
           - Source commit: \`${COMMIT_SHA}\`
           EOF
 
-      - name: Publish release
+      # Create the release as a DRAFT first. On immutable-release repos GitHub
+      # only accepts asset uploads before a release is published, so we attach
+      # nvidia-mig.raw to the draft, then publish it in the next step.
+      - name: Create draft release with assets
+        id: release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ github.run_number }}
@@ -113,15 +117,29 @@ jobs:
           files: |
             dist/nvidia-mig.raw
             dist/nvidia-mig.raw.sha256
-          draft: false
-          # Default (mark_latest=false): publish a prerelease gated behind a
-          # hardware-test issue. Override mark_latest=true to publish straight
-          # to Latest. Promotion of a prerelease happens via promote.yml when
-          # the hardware-test issue is closed.
-          prerelease: ${{ inputs.mark_latest != 'true' }}
-          make_latest: ${{ inputs.mark_latest == 'true' }}
+          draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish the draft. Default (mark_latest=false): publish as a PRERELEASE
+      # gated behind a hardware-test issue (promote.yml flips it to Latest when
+      # the issue is closed). Override mark_latest=true: publish straight to
+      # Latest. Editing these flags is allowed even on immutable releases; only
+      # the assets/tag are locked once published.
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REL_ID: ${{ steps.release.outputs.id }}
+          MARK_LATEST: ${{ inputs.mark_latest }}
+        run: |
+          if [ "$MARK_LATEST" = "true" ]; then
+            gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -f make_latest=true
+            echo "Published v${{ github.run_number }} straight to Latest"
+          else
+            gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -F prerelease=true
+            echo "Published v${{ github.run_number }} as a prerelease (hardware-test gate)"
+          fi
 
       - name: Open hardware-test issue (prerelease gate)
         if: inputs.mark_latest != 'true'
