@@ -1,6 +1,6 @@
-# TrueNAS Scale NVIDIA MIG for Blackwell
+# TrueNAS NVIDIA MIG for Blackwell
 
-NVIDIA MIG (Multi-Instance GPU) tooling for TrueNAS SCALE hosts running an **RTX PRO 6000 Blackwell**. A single lightweight sysext provides the MIG glue; it layers on top of whatever NVIDIA driver is already on the host.
+NVIDIA MIG (Multi-Instance GPU) tooling for TrueNAS hosts running an **RTX PRO 6000 Blackwell**. A single lightweight sysext provides the MIG glue; it layers on top of whatever NVIDIA driver is already on the host.
 
 If you don't know what NVIDIA MIG is then you don't need this sysext. MIG partitions the GPU into multiple isolated instances. It is not vGPU — it can only be used with containers. This release only supports TrueNAS apps (the docker service).
 
@@ -21,7 +21,7 @@ sudo configure-mig
 
 ## Why this exists
 
-TrueNAS SCALE bundles an NVIDIA driver, but doesn't ship the MIG setup glue: nothing creates instances at boot, nothing remaps app GPU UUIDs when MIG instances are recreated, and nothing makes that survive a TrueNAS update. This repo fills those gaps.
+TrueNAS bundles an NVIDIA driver, but doesn't ship the MIG setup glue: nothing creates instances at boot, nothing remaps app GPU UUIDs when MIG instances are recreated, and nothing makes that survive a TrueNAS update. This repo fills those gaps.
 
 A release carries one asset, `nvidia-mig.raw`:
 
@@ -39,7 +39,7 @@ Install it first with [**nvidia-driver-support**](https://github.com/truenas-com
 
 ## Prerequisites
 
-- TrueNAS SCALE 25.10 or later (older versions ship pre-570.x drivers, on which MIG is unsupported)
+- TrueNAS 25.10 or later (older versions ship pre-570.x drivers, on which MIG is unsupported)
 - An NVIDIA GPU that supports MIG (RTX PRO 6000 Blackwell confirmed)
 - Workstation Edition cards: a one-time `displaymodeselector` switch into compute mode (see [docs/architecture.md](docs/architecture.md#workstation-edition-one-time-setup))
 
