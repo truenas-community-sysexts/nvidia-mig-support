@@ -698,7 +698,28 @@ else
 fi
 
 echo ""
-if $OK; then
+if $OK && [ -f "${PERSIST_DIR}/mig.conf" ]; then
+    # An existing mig.conf means MIG is already configured — don't send the user
+    # to configure-mig (re-running it tears down and recreates instances for no
+    # reason). The unmerge/merge above only swaps the tooling sysext; it does not
+    # touch live MIG instances or running GPU apps, so MIG keeps working. The
+    # self-heal PREINIT re-applies mig.conf on every boot.
+    cat <<EOF
+=== Install complete — MIG already configured ===
+
+An existing config is present at ${PERSIST_DIR}/mig.conf, so MIG is already
+set up — no configuration step is needed. The self-heal PREINIT re-applies it
+on every boot (enable MIG, recreate instances, remap apps).
+
+  nvidia-smi -L                            # verify the current MIG instances
+  sudo configure-mig                       # ONLY to change the MIG profile layout
+
+If MIG isn't active right now (e.g. you just rebuilt the driver), re-apply
+mig.conf without reconfiguring:
+
+  sudo systemctl restart nvidia-mig-setup.service
+EOF
+elif $OK; then
     cat <<EOF
 === Install complete — ready to configure NOW (no reboot needed) ===
 
