@@ -1,6 +1,6 @@
 # Architecture
 
-This repo produces **one** systemd-sysext extension for TrueNAS SCALE on an NVIDIA Blackwell host — `nvidia-mig.raw`, the MIG tooling — plus a small set of management scripts. It layers on top of whatever NVIDIA driver is already present.
+This repo produces **one** systemd-sysext extension for TrueNAS on an NVIDIA Blackwell host — `nvidia-mig.raw`, the MIG tooling — plus a small set of management scripts. It layers on top of whatever NVIDIA driver is already present.
 
 The NVIDIA driver itself is a separate project: [nvidia-driver-support](https://github.com/truenas-community-sysexts/nvidia-driver-support). This repo used to build/swap the driver too (the old `--with-driver` path); that has been split out. See [refactor-history.md](refactor-history.md).
 
