@@ -286,7 +286,7 @@ do_check() {
             "run 'sudo configure-mig' to set up MIG profiles"
     fi
 
-    # PREINIT entry: nvidia-mig-setup service start.
+    # PREINIT entry: the on-pool nvidia-mig-preinit.sh self-heal script.
     if command -v midclt >/dev/null 2>&1; then
         local mig_entry
         mig_entry=$(midclt call initshutdownscript.query 2>/dev/null \
@@ -295,19 +295,19 @@ import sys, json
 try:
     for s in json.load(sys.stdin):
         haystack = (s.get('command') or '') + ' ' + (s.get('script') or '')
-        if 'nvidia-mig-setup' in haystack and 'preinit' not in haystack:
+        if 'nvidia-mig-preinit' in haystack:
             print(f\"{s.get('when','?')}|{s.get('enabled','?')}\")
             break
 except Exception:
     pass" 2>/dev/null || true)
         if [ -z "$mig_entry" ]; then
-            record_fail "No PREINIT entry registered for nvidia-mig-setup.service" \
+            record_fail "No PREINIT entry registered for nvidia-mig-preinit.sh" \
                 "re-run install — middleware registration missing"
         else
             local when enabled
             IFS='|' read -r when enabled <<<"$mig_entry"
             if [ "$when" = "PREINIT" ] && [ "$enabled" = "True" ]; then
-                record_pass "PREINIT 'nvidia-mig-setup' registered (PREINIT, enabled)"
+                record_pass "PREINIT 'nvidia-mig-preinit' registered (PREINIT, enabled)"
             else
                 record_warn "PREINIT entry for nvidia-mig-setup state: when=${when}, enabled=${enabled}" \
                     "re-run install to normalize"
@@ -593,12 +593,53 @@ except Exception:
     fi
 }
 
-# MIG service start. Match against the literal "nvidia-mig-setup.service"
-# command form so the matcher is unambiguous.
-register_preinit "nvidia-mig-setup.service" \
-    "/usr/bin/systemctl start nvidia-mig-setup.service" \
-    "Start nvidia-mig-setup service (MIG instance recreation)" \
-    120
+# Stage scripts/nvidia-mig-preinit.sh to $1. Prefer a sibling file (checkout /
+# extracted dir); otherwise fetch from the repo (release tag if one was given,
+# then main). Honors --dry-run. Returns non-zero if it can't obtain the file.
+stage_mig_preinit() {
+    local dest="$1" dir ref url
+    dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || dir=""
+    if [ -n "$dir" ] && [ -f "${dir}/nvidia-mig-preinit.sh" ]; then
+        if_real cp "${dir}/nvidia-mig-preinit.sh" "$dest"
+        return 0
+    fi
+    if $DRY_RUN; then
+        echo "[dry-run] would: fetch nvidia-mig-preinit.sh (release ${RELEASE_TAG:-<none>} -> main) to ${dest}" >&2
+        return 0
+    fi
+    for ref in "$RELEASE_TAG" main; do
+        [ -n "$ref" ] || continue
+        url="https://raw.githubusercontent.com/${REPO}/${ref}/scripts/nvidia-mig-preinit.sh"
+        if curl -fsSL --retry 3 -o "$dest" "$url"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Stage the self-heal PREINIT onto the data pool so it survives the /usr+/etc
+# wipe a major TrueNAS update performs (mirrors the driver's on-pool
+# nvidia-preinit-driver.sh). It re-merges the MIG sysext on boot before starting
+# the setup service — the older "systemctl start nvidia-mig-setup.service"
+# PREINIT assumed the sysext was already merged, which is false after a major
+# upgrade wipes the /etc/extensions symlink.
+PREINIT_DEST="${PERSIST_DIR}/nvidia-mig-preinit.sh"
+echo "Staging self-heal PREINIT to ${PREINIT_DEST}..."
+if ! stage_mig_preinit "$PREINIT_DEST"; then
+    echo "ERROR: failed to stage nvidia-mig-preinit.sh to ${PREINIT_DEST}" >&2
+    echo "  (not found alongside this script and could not be fetched from the repo)" >&2
+    exit 1
+fi
+if_real chmod 0755 "$PREINIT_DEST"
+
+# Register the on-pool self-heal script by path. Match token "nvidia-mig" so an
+# existing install's older "systemctl start nvidia-mig-setup.service" entry is
+# replaced in place, not duplicated. The driver PREINIT (nvidia-preinit-driver.sh)
+# does NOT contain "nvidia-mig", so it is unaffected.
+register_preinit "nvidia-mig" \
+    "$PREINIT_DEST" \
+    "Self-heal + start MIG sysext (re-merge after TrueNAS update, then MIG setup)" \
+    300
 
 # NOTE on the Apps' NVIDIA toggle (docker.config.nvidia):
 #

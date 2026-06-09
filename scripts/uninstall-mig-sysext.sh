@@ -361,16 +361,17 @@ systemctl daemon-reload
 # ─────────────────────────────────────────────────────────────────────────
 # Deregister the MIG PREINIT entry.
 # ─────────────────────────────────────────────────────────────────────────
-# Match `nvidia-mig-setup` but explicitly exclude entries that also contain
-# 'preinit' (a legacy driver PREINIT command referenced the MIG service name
-# indirectly in some old installs).
+# Match any MIG PREINIT entry: the current on-pool `nvidia-mig-preinit.sh` form
+# and the legacy `systemctl start nvidia-mig-setup.service` form both contain
+# 'nvidia-mig'. The driver PREINIT (nvidia-preinit-driver.sh) does NOT contain
+# 'nvidia-mig', so it is left untouched.
 MIG_PREINIT_ID=$(midclt call initshutdownscript.query 2>/dev/null \
     | python3 -c "
 import sys, json
 try:
     for s in json.load(sys.stdin):
         cmd = (s.get('command') or '') + ' ' + (s.get('script') or '')
-        if 'nvidia-mig-setup' in cmd and 'preinit' not in cmd:
+        if 'nvidia-mig' in cmd:
             print(s['id'], end=''); break
 except Exception:
     pass
@@ -388,8 +389,8 @@ fi
 # backups belong to nvidia-driver-support and are left alone).
 # ─────────────────────────────────────────────────────────────────────────
 if ! $KEEP_PERSIST && [ -n "$PERSIST_DIR" ]; then
-    rm -f "$PERSIST_DIR/nvidia-mig.raw" "$PERSIST_DIR/mig.conf"
-    echo "Removed $PERSIST_DIR/nvidia-mig.raw + mig.conf"
+    rm -f "$PERSIST_DIR/nvidia-mig.raw" "$PERSIST_DIR/mig.conf" "$PERSIST_DIR/nvidia-mig-preinit.sh"
+    echo "Removed $PERSIST_DIR/nvidia-mig.raw + mig.conf + nvidia-mig-preinit.sh"
     echo "  (pass --keep-persist to retain them)"
 fi
 
