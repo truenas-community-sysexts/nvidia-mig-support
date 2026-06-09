@@ -142,7 +142,13 @@ log "First MIG UUID: $COMPUTE_UUID"
 # Wait for middleware to be ready (it may still be starting at PREINIT time).
 # Time-based so the journal shows clear elapsed seconds rather than opaque
 # "attempt N/M" counters.
-MIDDLEWARE_TIMEOUT=25
+#
+# 120s (was 25s): on a real cold boot — especially right after a major TrueNAS
+# upgrade — middleware can take well over 25s to answer system.ready. When it
+# isn't ready the app-UUID remap below silently no-ops, leaving GPU apps pointed
+# at stale MIG UUIDs ("UUID Not Found"). The PREINIT timeout (300s) and the
+# preceding driver wait (60s) leave ample headroom for this longer wait.
+MIDDLEWARE_TIMEOUT=120
 MIDDLEWARE_POLL_INTERVAL=5
 mid_elapsed=0
 mid_logged_initial=false

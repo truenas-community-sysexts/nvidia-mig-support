@@ -26,6 +26,7 @@ jobs:
           shellcheck --severity=warning \
             scripts/build-mig-sysext.sh \
             scripts/install-mig-sysext.sh \
+            scripts/nvidia-mig-preinit.sh \
             scripts/uninstall-mig-sysext.sh \
             scripts/configure-mig.sh
 
