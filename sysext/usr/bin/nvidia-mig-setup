@@ -154,7 +154,13 @@ mid_elapsed=0
 mid_logged_initial=false
 mid_ready=false
 while [ "$mid_elapsed" -lt "$MIDDLEWARE_TIMEOUT" ]; do
-    if midclt call system.ready 2>/dev/null | grep -q true; then
+    # system.ready returns a Python-style boolean: midclt prints it as `True`
+    # (capitalized), NOT lowercase JSON `true`. A case-sensitive `grep -q true`
+    # therefore NEVER matched — so this wait always ran to its full timeout even
+    # on a fully-ready system, and the app remap below silently no-op'd (apps
+    # lost their MIG UUID pins on every boot). Match case-insensitively.
+    # (configure-mig.sh compares to the literal "True" for this same reason.)
+    if midclt call system.ready 2>/dev/null | grep -qiw true; then
         mid_ready=true
         break
     fi
