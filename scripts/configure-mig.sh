@@ -599,7 +599,8 @@ for attempt in $(seq 1 10); do
         printf "\r  GPU clients released                                    \n"
         break
     fi
-    printf "\r  Waiting for %d GPU process(es)... %ds/30s" "$N" "$((attempt * 3))"
+    # Fixed-width field clears the placeholder line above (bare \r leaves its tail).
+    printf "\r  %-44s" "Waiting for $N GPU process(es)... $((attempt * 3))s/30s"
     sleep 3
 done
 
