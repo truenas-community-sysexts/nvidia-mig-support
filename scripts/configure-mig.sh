@@ -979,13 +979,58 @@ except: print('')" 2>/dev/null)
 
     # Build the payload with python3 (slot and uuid passed as argv) instead of
     # interpolating into a JSON string literal, to avoid quoting/escaping bugs.
-    payload=$(python3 -c '
+    #
+    # Alongside the universal nvidia_gpu_selection (which middleware turns into
+    # NVIDIA_VISIBLE_DEVICES), also pin CUDA_VISIBLE_DEVICES=<MIG-UUID> in the
+    # app's additional_envs. A *privileged* container makes the NVIDIA toolkit
+    # IGNORE NVIDIA_VISIBLE_DEVICES (it sees every MIG instance, and CUDA then
+    # defaults to device 0 — frequently the wrong instance, e.g. a -me compute
+    # slice with no NVDEC, which silently kills ffmpeg/Frigate). CUDA_VISIBLE_-
+    # DEVICES is enforced by the CUDA driver *inside* the container, so it pins
+    # the correct instance regardless of privileged, and it shows up in the
+    # app's Edit UI under "Additional Environment Variables". For a
+    # non-privileged app it's a harmless no-op (it just matches the assigned MIG).
+    #
+    # additional_envs lives at an app-specific path (almost always
+    # <app>.additional_envs), so read the current config and DFS for it.
+    # app.update replaces lists wholesale, so send back the full merged list
+    # (existing envs + ours, with any stale CUDA_VISIBLE_DEVICES replaced).
+    cur_config=$(midclt call app.config "$app" 2>/dev/null || echo '{}')
+    payload=$(printf '%s' "$cur_config" | python3 -c '
 import json, sys
+cfg = json.load(sys.stdin)
 slot, uuid = sys.argv[1], sys.argv[2]
-print(json.dumps({"values": {"resources": {"gpus": {
+values = {"resources": {"gpus": {
     "use_all_gpus": False,
     "nvidia_gpu_selection": {slot: {"use_gpu": True, "uuid": uuid}},
-}}}}))
+}}}
+
+def find_envs(node, path):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "additional_envs" and (isinstance(v, list) or v is None):
+                return path + [k], v
+            r = find_envs(v, path + [k])
+            if r:
+                return r
+    return None
+
+found = find_envs(cfg, [])
+if found:
+    env_path, env_list = found
+    env_list = [e for e in (env_list or [])
+                if not (isinstance(e, dict) and e.get("name") == "CUDA_VISIBLE_DEVICES")]
+    env_list.append({"name": "CUDA_VISIBLE_DEVICES", "value": uuid})
+    node = values
+    for key in env_path[:-1]:
+        node = node.setdefault(key, {})
+    node[env_path[-1]] = env_list
+    sys.stderr.write("    + CUDA_VISIBLE_DEVICES via %s\n" % ".".join(env_path))
+else:
+    sys.stderr.write("    ! app has no additional_envs field; skipped CUDA_VISIBLE_DEVICES "
+                     "(only needed if you run this app privileged)\n")
+
+print(json.dumps({"values": values}))
 ' "$PCI_SLOT" "${STAGED_UUID[$i]}")
     if run_with_elapsed_capture "    Applying GPU config" midclt call -j app.update "$app" "$payload"; then
         echo "    Applying GPU config... OK (${ELAPSED}s)"
