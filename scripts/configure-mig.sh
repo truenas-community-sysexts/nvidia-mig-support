@@ -1002,17 +1002,23 @@ except: print('')" 2>/dev/null)
     # additional_envs lives at an app-specific path (almost always
     # <app>.additional_envs), so read the current config and DFS for it, then
     # send that ENTIRE top-level group back (with stale CUDA_VISIBLE_DEVICES
-    # replaced). resources stays a minimal partial — it's a separate top-level
-    # key, and middleware re-defaults resources.limits to the same value.
+    # replaced). resources gets the same read-modify-write treatment so its
+    # limits (and any other sub-keys) aren't re-defaulted either.
     cur_config=$(midclt call app.config "$app" 2>/dev/null || echo '{}')
     payload=$(printf '%s' "$cur_config" | python3 -c '
 import json, sys
 cfg = json.load(sys.stdin)
 slot, uuid = sys.argv[1], sys.argv[2]
-values = {"resources": {"gpus": {
-    "use_all_gpus": False,
-    "nvidia_gpu_selection": {slot: {"use_gpu": True, "uuid": uuid}},
-}}}
+
+# resources: read-modify-write the full existing group (preserve limits and
+# any other sub-keys), changing only the GPU selection. Falls back to a bare
+# gpus block for an app that has no resources config yet.
+resources = cfg.get("resources") or {}
+gpus = resources.get("gpus") or {}
+gpus["use_all_gpus"] = False
+gpus["nvidia_gpu_selection"] = {slot: {"use_gpu": True, "uuid": uuid}}
+resources["gpus"] = gpus
+values = {"resources": resources}
 
 def find_envs(node, path):
     if isinstance(node, dict):
