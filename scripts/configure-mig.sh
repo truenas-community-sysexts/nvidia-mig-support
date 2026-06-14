@@ -992,19 +992,34 @@ except: print('')" 2>/dev/null)
     # app's Edit UI under "Additional Environment Variables". For a
     # non-privileged app it's a harmless no-op (it just matches the assigned MIG).
     #
+    # CRITICAL: app.update does NOT deep-merge. For any top-level group it
+    # receives, it REPLACES the whole group with what you send and fills schema
+    # DEFAULTS for every field you omit. So a partial write like
+    # {"frigate": {"additional_envs": [...]}} silently wipes the app's other
+    # settings (devices/passthroughs, shm_size_mb, privileged, ...) back to
+    # defaults. To touch additional_envs safely we must read the CURRENT full
+    # group and send it back intact, changing only additional_envs.
+    #
     # additional_envs lives at an app-specific path (almost always
-    # <app>.additional_envs), so read the current config and DFS for it.
-    # app.update replaces lists wholesale, so send back the full merged list
-    # (existing envs + ours, with any stale CUDA_VISIBLE_DEVICES replaced).
+    # <app>.additional_envs), so read the current config and DFS for it, then
+    # send that ENTIRE top-level group back (with stale CUDA_VISIBLE_DEVICES
+    # replaced). resources gets the same read-modify-write treatment so its
+    # limits (and any other sub-keys) aren't re-defaulted either.
     cur_config=$(midclt call app.config "$app" 2>/dev/null || echo '{}')
     payload=$(printf '%s' "$cur_config" | python3 -c '
 import json, sys
 cfg = json.load(sys.stdin)
 slot, uuid = sys.argv[1], sys.argv[2]
-values = {"resources": {"gpus": {
-    "use_all_gpus": False,
-    "nvidia_gpu_selection": {slot: {"use_gpu": True, "uuid": uuid}},
-}}}
+
+# resources: read-modify-write the full existing group (preserve limits and
+# any other sub-keys), changing only the GPU selection. Falls back to a bare
+# gpus block for an app that has no resources config yet.
+resources = cfg.get("resources") or {}
+gpus = resources.get("gpus") or {}
+gpus["use_all_gpus"] = False
+gpus["nvidia_gpu_selection"] = {slot: {"use_gpu": True, "uuid": uuid}}
+resources["gpus"] = gpus
+values = {"resources": resources}
 
 def find_envs(node, path):
     if isinstance(node, dict):
@@ -1022,11 +1037,16 @@ if found:
     env_list = [e for e in (env_list or [])
                 if not (isinstance(e, dict) and e.get("name") == "CUDA_VISIBLE_DEVICES")]
     env_list.append({"name": "CUDA_VISIBLE_DEVICES", "value": uuid})
-    node = values
+    # Write the modified list back into the FULL config subtree, then send the
+    # whole top-level group it lives in (read-modify-write) so no sibling field
+    # (devices, shm_size_mb, privileged, ...) gets reset to its default.
+    node = cfg
     for key in env_path[:-1]:
-        node = node.setdefault(key, {})
+        node = node[key]
     node[env_path[-1]] = env_list
-    sys.stderr.write("    + CUDA_VISIBLE_DEVICES via %s\n" % ".".join(env_path))
+    top = env_path[0]
+    values[top] = cfg[top]
+    sys.stderr.write("    + CUDA_VISIBLE_DEVICES via %s (full group preserved)\n" % ".".join(env_path))
 else:
     sys.stderr.write("    ! app has no additional_envs field; skipped CUDA_VISIBLE_DEVICES "
                      "(only needed if you run this app privileged)\n")
