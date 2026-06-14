@@ -247,7 +247,8 @@ except Exception:
                 printf "\r  GPU compute clients released                              \n"
                 break
             fi
-            printf "\r  Waiting for %d GPU process(es)... %ds/15s" "$N" "$((attempt * 3))"
+            # Fixed-width field clears the placeholder line above (bare \r leaves its tail).
+            printf "\r  %-44s" "Waiting for $N GPU process(es)... $((attempt * 3))s/15s"
             sleep 3
         done
 
