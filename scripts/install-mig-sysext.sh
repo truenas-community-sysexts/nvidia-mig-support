@@ -98,6 +98,25 @@ if_real() {
     fi
 }
 
+# Resolve the repo's latest release into RELEASE_TAG (no-op when --release
+# pinned one). Follows redirects with -L so a renamed repo still lands on the
+# /releases/tag/<tag> URL; one HEAD probe, no GitHub API rate limits.
+resolve_release_tag() {
+    [ -n "$RELEASE_TAG" ] && return 0
+    local final
+    final=$(curl -fsSIL -o /dev/null --retry 3 --max-time 30 \
+        -w '%{url_effective}' "https://github.com/${REPO}/releases/latest") || final=""
+    case "$final" in
+        */releases/tag/?*) RELEASE_TAG="${final##*/}" ;;
+        *)
+            echo "ERROR: cannot resolve the latest release tag (got '${final:-nothing}')" >&2
+            echo "       Pass --release=TAG to pin one explicitly." >&2
+            return 1
+            ;;
+    esac
+    echo "Resolved latest release: ${RELEASE_TAG}"
+}
+
 # Read the driver version embedded in a sysext .raw via libnvidia-ml.so.X.Y.Z.
 read_raw_driver_version() {
     [ -f "$1" ] || return 0
@@ -475,28 +494,42 @@ resolve_persist_dir || exit 1
 if_real mkdir -p "$PERSIST_DIR"
 
 # --- Fetch nvidia-mig.raw if not provided ---
-# No release tag → the repo's latest release via the redirecting download URL.
-# --release=TAG → that exact tag.
+# The tag is resolved before anything downloads so the raw, its .sha256
+# sidecar, and the PREINIT script staged later all come from one release
+# instead of straddling a publish that lands mid-install.
 MIG_TMP=""
-if [ -z "$MIG_SRC" ]; then
-    MIG_TMP=$(mktemp -t nvidia-mig.raw.XXXXXX)
-    if [ -n "$RELEASE_TAG" ]; then
-        MIG_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${MIG_ASSET}"
-    else
-        MIG_URL="https://github.com/${REPO}/releases/latest/download/${MIG_ASSET}"
-    fi
-    echo "Downloading ${MIG_URL}"
-    curl -fL --retry 3 -o "$MIG_TMP" "$MIG_URL" \
-        || { echo "ERROR: failed to download nvidia-mig.raw" >&2; rm -f "$MIG_TMP"; exit 1; }
-    MIG_SRC="$MIG_TMP"
-fi
-[ -f "$MIG_SRC" ] || { echo "ERROR: MIG sysext source not found: $MIG_SRC" >&2; exit 1; }
-
-# Single cleanup trap for any tempfile we created.
+# Single cleanup trap for any tempfile we create; armed before the download
+# so an interrupt mid-transfer doesn't orphan a multi-MB file in /tmp.
 cleanup_tmp() {
     [ -n "${MIG_TMP:-}" ] && rm -f "$MIG_TMP"
 }
 trap cleanup_tmp EXIT INT TERM
+if [ -z "$MIG_SRC" ]; then
+    resolve_release_tag || exit 1
+    MIG_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${MIG_ASSET}"
+    # Sidecar first (it is tiny; a missing one fails before the raw transfer).
+    # Hash-field compare rather than `sha256sum -c`: the download lands in a
+    # mktemp name that can't match the filename recorded in the sidecar. The
+    # hex guard keeps a soft-404 HTML page from reading as a mismatch.
+    _expected=$(curl -fsSL --retry 3 --max-time 30 "${MIG_URL}.sha256" \
+        | awk '{print $1; exit}' | tr '[:upper:]' '[:lower:]') || _expected=""
+    if ! [[ "$_expected" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "ERROR: no usable ${MIG_ASSET}.sha256 on release ${RELEASE_TAG}" >&2
+        exit 1
+    fi
+    MIG_TMP=$(mktemp -t nvidia-mig.raw.XXXXXX)
+    echo "Downloading ${MIG_URL}"
+    curl -fL --retry 3 -o "$MIG_TMP" "$MIG_URL" \
+        || { echo "ERROR: failed to download nvidia-mig.raw" >&2; exit 1; }
+    _actual=$(sha256sum "$MIG_TMP" | awk '{print $1}')
+    if [ "$_expected" != "$_actual" ]; then
+        echo "ERROR: SHA256 mismatch for ${MIG_ASSET}: expected ${_expected}, got ${_actual}" >&2
+        exit 1
+    fi
+    echo "SHA256 verified: ${_actual}"
+    MIG_SRC="$MIG_TMP"
+fi
+[ -f "$MIG_SRC" ] || { echo "ERROR: MIG sysext source not found: $MIG_SRC" >&2; exit 1; }
 
 # --- Sanity-check the MIG sysext contents ---
 # Buffer the listing before grep -q — piping unsquashfs into `grep -q`
@@ -594,8 +627,9 @@ except Exception:
 }
 
 # Stage scripts/nvidia-mig-preinit.sh to $1. Prefer a sibling file (checkout /
-# extracted dir); otherwise fetch from the repo (release tag if one was given,
-# then main). Honors --dry-run. Returns non-zero if it can't obtain the file.
+# extracted dir); otherwise fetch from the pinned release tag, falling back to
+# main only when no tag resolves or the tag predates this script (pre-v29).
+# Honors --dry-run. Returns non-zero if it can't obtain the file.
 stage_mig_preinit() {
     local dest="$1" dir ref url
     dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || dir=""
@@ -603,6 +637,9 @@ stage_mig_preinit() {
         if_real cp "${dir}/nvidia-mig-preinit.sh" "$dest"
         return 0
     fi
+    # Pins --sysext installs too; on resolution failure the loop below still
+    # has its main fallback.
+    resolve_release_tag || true
     if $DRY_RUN; then
         echo "[dry-run] would: fetch nvidia-mig-preinit.sh (release ${RELEASE_TAG:-<none>} -> main) to ${dest}" >&2
         return 0
