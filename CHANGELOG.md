@@ -2,6 +2,14 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## Fix: verified, tag-pinned installs (checksum check + bundled PREINIT)
+
+A default install used the `/releases/latest/download/` redirect without ever learning which tag it installed: `nvidia-mig.raw` was downloaded with no integrity check even though every release ships a `.sha256` sidecar, and the boot PREINIT was fetched from moving `main`, which can desync from the installed sysext.
+
+- **Installs resolve "latest" to a concrete tag first** (one redirect probe, no GitHub API rate limits) and pin everything to it. The raw is verified against the release's `.sha256` sidecar (fetched before the transfer; missing or mismatched is fatal, so the sidecar asset is load-bearing). A hex guard keeps proxy soft-404 pages from reading as checksum mismatches.
+- **`nvidia-mig-preinit.sh` is bundled inside the raw** at `usr/share/nvidia-mig/` and staged from there, putting the root-run boot script under the same SHA256 verification as everything else, including `--sysext` local raws, which previously had no pinning at all. Raws that predate the bundling fall back to a fetch pinned to the release tag, with `main` a loudly warned last resort (pre-v29 tags only). The build smoke-test refuses to publish a raw without the bundled copy. Tradeoff: a preinit hotfix on `main` is not picked up until a release is cut.
+- **Trap fixes.** The cleanup trap's `[ -n ] && rm` shape returned 1 with no tempfile, which under `set -e` made every successful `--sysext` install exit 1. INT/TERM now exit instead of cleaning up and letting the install keep running against a deleted file. All preinit writes go through a temp file then `mv`, so a failed transfer cannot truncate the live on-pool copy.
+
 ## Fix: GPU/MIG apps crash on every reboot — order docker.service after MIG setup
 
 A boot race took every MIG-assigned app (Frigate, Ollama, …) offline on **every reboot**, not just driver swaps. MIG instances don't survive a reboot; `nvidia-mig-setup` recreates them each boot. But TrueNAS apps default to `restart=unless-stopped`, so dockerd restarted the GPU containers the moment `docker.service` came up — which raced ahead of instance creation. Measured on hardware: docker started ~11 s before `nvidia-mig-setup` created the instances, so the containers hit a not-yet-existent MIG device and crashed at task creation with `failed to get device handle from UUID: Not Found` (CDI auto-mode). Non-GPU apps were unaffected, which is what made it look app-specific. The MIG UUIDs were deterministic and matched the saved assignments throughout — the device simply wasn't there yet.
