@@ -49,6 +49,13 @@ cp "${REPO_ROOT}/sysext/usr/lib/systemd/system/nvidia-mig-setup.service" \
    "${STAGE}/usr/lib/systemd/system/nvidia-mig-setup.service"
 chmod 0644 "${STAGE}/usr/lib/systemd/system/nvidia-mig-setup.service"
 
+# Bundle the boot PREINIT so the installer stages it out of the verified
+# raw instead of a second (unverifiable) network fetch.
+mkdir -p "${STAGE}/usr/share/nvidia-mig"
+cp "${REPO_ROOT}/scripts/nvidia-mig-preinit.sh" \
+   "${STAGE}/usr/share/nvidia-mig/nvidia-mig-preinit.sh"
+chmod 0644 "${STAGE}/usr/share/nvidia-mig/nvidia-mig-preinit.sh"
+
 # No multi-user.target.wants symlink — boot activation is via a TrueNAS
 # PREINIT entry registered by install-mig-sysext.sh, not via WantedBy.
 # nvidia-mig-setup.service declares Before=docker.service so dockerd waits for

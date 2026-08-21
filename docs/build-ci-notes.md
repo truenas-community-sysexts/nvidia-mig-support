@@ -21,7 +21,7 @@ The single asset is `nvidia-mig.raw` (plus its `.sha256`). The build smoke-tests
 
 - No `--release` → the script resolves the tag behind `https://github.com/<repo>/releases/latest` (one redirect probe, no API call, no TrueNAS-version matching), then downloads `releases/download/<tag>/nvidia-mig.raw`.
 - `--release=TAG` → `releases/download/<tag>/nvidia-mig.raw`.
-- Either way the download is verified against the release's `nvidia-mig.raw.sha256` sidecar (a hard failure if it is missing or mismatched, so the sidecar asset is load-bearing), and the on-pool PREINIT script is fetched from the same tag.
+- Either way the download is verified against the release's `nvidia-mig.raw.sha256` sidecar (a hard failure if it is missing or mismatched, so the sidecar asset is load-bearing), and the on-pool PREINIT script is staged from inside the verified raw (bundled at `usr/share/nvidia-mig/`; releases that predate the bundling fall back to a fetch pinned to the same tag).
 
 Because the sysext is driver/kernel-agnostic, there's no per-TrueNAS-version release matching to do — one latest release serves every host.
 

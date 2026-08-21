@@ -74,6 +74,7 @@ jobs:
           require_file "usr/bin/configure-mig"
           require_file "usr/bin/uninstall-nvidia-mig"
           require_file "usr/lib/systemd/system/nvidia-mig-setup.service"
+          require_file "usr/share/nvidia-mig/nvidia-mig-preinit.sh"
 
           if [ "$fail" -ne 0 ]; then
             echo "::error title=smoke-test::nvidia-mig.raw failed smoke-test — refusing to publish"

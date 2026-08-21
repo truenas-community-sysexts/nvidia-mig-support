@@ -626,12 +626,23 @@ except Exception:
     fi
 }
 
-# Stage scripts/nvidia-mig-preinit.sh to $1. Prefer a sibling file (checkout /
-# extracted dir); otherwise fetch from the pinned release tag, falling back to
-# main only when no tag resolves or the tag predates this script (pre-v29).
-# Honors --dry-run. Returns non-zero if it can't obtain the file.
+# Stage nvidia-mig-preinit.sh to $1. Prefer the copy bundled inside the
+# already-verified raw (it matches the installed sysext exactly); then a
+# sibling file (checkout / extracted dir); then a fetch from the pinned
+# release tag, with main only as the last resort (raws and tags older than
+# the bundling/preinit changes). Honors --dry-run. Returns non-zero if it
+# can't obtain the file.
 stage_mig_preinit() {
-    local dest="$1" dir ref url
+    local dest="$1" dir ref url xdir
+    xdir="$(mktemp -d -t mig-preinit.XXXXXX)"
+    if unsquashfs -f -d "$xdir" "$MIG_SRC" usr/share/nvidia-mig/nvidia-mig-preinit.sh \
+        >/dev/null 2>&1 \
+       && [ -f "${xdir}/usr/share/nvidia-mig/nvidia-mig-preinit.sh" ]; then
+        if_real cp "${xdir}/usr/share/nvidia-mig/nvidia-mig-preinit.sh" "$dest"
+        rm -rf "$xdir"
+        return 0
+    fi
+    rm -rf "$xdir"
     dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || dir=""
     if [ -n "$dir" ] && [ -f "${dir}/nvidia-mig-preinit.sh" ]; then
         if_real cp "${dir}/nvidia-mig-preinit.sh" "$dest"
