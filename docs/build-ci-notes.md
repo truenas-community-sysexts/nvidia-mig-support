@@ -13,7 +13,7 @@ The NVIDIA **driver** is not built here. It's a separate project: [nvidia-driver
 [`build-sysext.yml`](../.github/workflows/build-sysext.yml) is **manual dispatch only** (`workflow_dispatch`). Cut a release when the MIG tooling changes — there's nothing upstream to track, since the artifact doesn't depend on the driver or TrueNAS version.
 
 - **Tag: `v<run_number>`** — `github.run_number`, an auto-incrementing counter. Mirrors nvidia-driver-support. Monotonic and unique across retries, so `softprops/action-gh-release` always creates a fresh release cleanly. This matters because the repo enforces **immutable releases** (a tag/assets can't be modified once created) — a rolling tag would fail with `Cannot delete asset from an immutable release`.
-- **`make_latest: true`** — every manual build promotes itself to GitHub "Latest". The install script's no-tag path resolves "Latest" to its tag and downloads from it, so the newest build is what users get.
+- **Latest promotion**: the default dispatch (`mark_latest=false`) publishes a prerelease gated behind a hardware-test issue; promote.yml flips it to "Latest" when the issue closes (`mark_latest=true` publishes straight to Latest). The install script's no-tag path resolves "Latest" to its tag and downloads from it, so users get the newest promoted build.
 
 The single asset is `nvidia-mig.raw` (plus its `.sha256`). The build smoke-tests the artifact before publishing; a failing smoke test blocks the release.
 
