@@ -587,12 +587,17 @@ if_real ln -sf "$LIVE_NVIDIA" /etc/extensions/nvidia.raw
 if_real ln -sf "${PERSIST_DIR}/nvidia-mig.raw" /etc/extensions/nvidia-mig.raw
 
 # Unmerge + re-merge so the refreshed nvidia-mig.raw is picked up. The driver
-# sysext is left untouched (no /usr write, no driver swap).
+# sysext is left untouched (no /usr write, no driver swap). INT/TERM are held
+# off across the pair: exiting between them would leave both sysexts unmerged
+# (driver userspace gone) until a reboot or a manual merge.
+trap '' INT TERM
 echo "Unmerging sysext..."
 if_real systemd-sysext unmerge
 echo "Re-merging sysext..."
 if_real systemd-sysext merge
 if_real systemctl daemon-reload
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ─────────────────────────────────────────────────────────────────────────
 # Register the MIG service PREINIT via midclt.
