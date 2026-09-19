@@ -4,12 +4,20 @@ on:
   push:
     branches: [main]
     paths:
+      - 'get.sh'
       - 'scripts/**.sh'
+      - '.github/scripts/**'
       - '.github/workflows/**.yml'
+      - '.github/tracked-versions.json'
+      - 'tests/**'
   pull_request:
     paths:
+      - 'get.sh'
       - 'scripts/**.sh'
+      - '.github/scripts/**'
       - '.github/workflows/**.yml'
+      - '.github/tracked-versions.json'
+      - 'tests/**'
   workflow_dispatch:
 
 permissions:
@@ -24,11 +32,20 @@ jobs:
       - name: Run shellcheck
         run: |
           shellcheck --severity=warning \
+            get.sh \
             scripts/build-mig-sysext.sh \
             scripts/install-mig-sysext.sh \
             scripts/nvidia-mig-preinit.sh \
             scripts/uninstall-mig-sysext.sh \
-            scripts/configure-mig.sh
+            scripts/configure-mig.sh \
+            .github/scripts/*.sh
+
+  tracked-versions:
+    name: tracked-versions.json shape
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: .github/scripts/validate-tracked-versions.sh
 
   actionlint:
     name: actionlint workflows
@@ -46,3 +63,13 @@ jobs:
         # Match the standalone shellcheck job's severity (--severity=warning)
         # so the two lints agree on what counts as a finding.
         run: ./actionlint -color -shellcheck "shellcheck --severity=warning"
+
+  python-tests:
+    name: release selection, promote and issue tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Runs get.sh's shared selection code, and promote.yml's and
+      # build-sysext.yml's github-script under node with stub clients.
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -v

@@ -1,0 +1,7 @@
+{
+  "_comment": "trains: every TrueNAS train a release supports. build-sysext.yml opens one hardware-test issue per train (label hardware-test for a stable train, preview-hardware-test for a preview one); closing it as completed approves the release for that train only (promote.yml), and get.sh installs only releases approved for the box's train. key is the train key get.sh derives from the TrueNAS version (major from 26 on, major.minor before). nvidia-mig.raw is driver- and kernel-agnostic (ID=_any) and the CI build targets no TrueNAS version, so unlike nvidia-driver-support there is no truenas smoke-build block.",
+  "trains": [
+    {"key": "25.10", "name": "TrueNAS 25.10", "channel": "stable"},
+    {"key": "26", "name": "TrueNAS 26 beta", "channel": "preview"}
+  ]
+}

@@ -2,6 +2,16 @@
 
 Notable changes to nvidia-mig-support, organized by area. Starts from the post-dual-sysext refactor baseline; per-release changelog entries land here going forward.
 
+## Releases are approved per TrueNAS train, and nothing unapproved is installed
+
+A hardware test on one TrueNAS train now approves a release for that train's boxes only. The installer used to come from `main` (gated by nothing) and take GitHub's Latest release.
+
+- **New one-liner: `curl -fsSL .../main/get.sh | sudo bash`** (uninstall: `... | sudo bash -s -- --uninstall`). It derives the train from the TrueNAS version (the major from 26 on, so every 26.x including betas is `26`; major.minor before that, e.g. `25.10`), picks the newest release approved for that train, and runs that release's `install-mig-sysext.sh` (or `uninstall-mig-sysext.sh`) with `--release=<tag>`, so the raw it downloads and verifies comes from the same release. Approved means the release notes carry `<!-- verified-train: <train> -->`, or it is a full release with no such marker (every release from before this change, so v33 stays the release on both 25.10 and 26 until a newer one is approved). With nothing approved for the train it stops and links the open hardware tests. Releases from before this change carry only the raw and its checksum; for those `get.sh` runs the script at the release's tag. The old `main/scripts/install-mig-sysext.sh` one-liner still works and applies the same rule. `--release=TAG` still pins any release.
+- **`install-mig-sysext.sh` without `--release`** resolves the release by the same rule instead of the `/releases/latest` redirect, and stops when nothing is approved. The `.sha256` verification and the bundled-PREINIT staging are unchanged; the PREINIT fetch for raws that predate the bundling no longer falls back to `main`.
+- **One hardware-test issue per train.** `build-sysext.yml` opens an issue per train in the new `.github/tracked-versions.json` (`hardware-test` for TrueNAS 25.10, `preview-hardware-test` for the TrueNAS 26 beta), each naming its train in the title and body. Closing one as completed approves the release for that train only (`promote.yml` adds the marker); the first approval also turns the pre-release into a full release and appends the changelog. GitHub's "Latest" now follows the newest release approved for a stable train and is cosmetic. Issues from before this change (no train marker) promote exactly as before.
+- **`build-sysext.yml` no longer has the `mark_latest` input.** A full release without markers is approved for every train, so publishing one straight to Latest would reach every box untested. Every release now starts as a pre-release. Releases also carry `install-mig-sysext.sh` and `uninstall-mig-sysext.sh`.
+- **CI:** `lint.yml` validates `tracked-versions.json`, shellchecks `get.sh`, and runs the unit tests in `tests/` (selection, `get.sh` end to end with stub `midclt`/`curl`, and the issue and promote scripts under node).
+
 ## Fix: verified, tag-pinned installs (checksum check + bundled PREINIT)
 
 A default install used the `/releases/latest/download/` redirect without ever learning which tag it installed: `nvidia-mig.raw` was downloaded with no integrity check even though every release ships a `.sha256` sidecar, and the boot PREINIT was fetched from moving `main`, which can desync from the installed sysext.
