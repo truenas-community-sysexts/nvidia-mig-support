@@ -584,7 +584,10 @@ fi
 
 echo ""
 echo "  Disabling nvidia toolkit for docker (belt-and-suspenders)..."
-midclt call docker.update '{"nvidia": false}' >/dev/null \
+# -j: docker.update is a middleware job whose nvidia handler runs its own
+# `systemd-sysext refresh` and restarts docker. Without -j midclt returns at
+# once and that work overlaps the MIG teardown below.
+midclt call -j docker.update '{"nvidia": false}' >/dev/null \
     || echo "  WARN: docker.update returned an error — middleware may be flapping"
 
 # Short drain: app.stop -j already blocked on container teardown, so this
@@ -617,7 +620,7 @@ if [ "${N:-0}" -gt 0 ]; then
     echo "       manual nvidia-smi, jail/VM passthrough)." >&2
     echo "" >&2
     echo "       Re-enabling nvidia toolkit so apps come back, then exiting." >&2
-    midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+    midclt call -j docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
     exit 1
 fi
 
@@ -638,7 +641,7 @@ systemctl status nvidia-mig-setup.service --no-pager -n 0 | head -3 || true
 # --- Re-enable app services ---
 echo ""
 echo "Re-enabling app services..."
-midclt call docker.update '{"nvidia": true}' >/dev/null \
+midclt call -j docker.update '{"nvidia": true}' >/dev/null \
     || echo "WARN: app services API call (docker.update) re-enable failed"
 
 # --- Wait for apps to come back so we can list them ---
