@@ -8,19 +8,21 @@ name: Build Sysext
 # The NVIDIA driver is a separate project (nvidia-driver-support) and is NOT
 # built or published here.
 #
-# Manual dispatch only — cut a release when the MIG tooling changes.
+# Manual dispatch only: cut a release when the MIG tooling changes.
+#
+# GATE: every release is published as a PRERELEASE, and one hardware-test
+# issue is opened per TrueNAS train in .github/tracked-versions.json
+# (`hardware-test` for a stable train, `preview-hardware-test` for a preview
+# one). Closing a train's issue as completed approves the release for that
+# train's boxes only (promote.yml adds a verified-train marker to its notes);
+# get.sh installs only releases approved for the box's train.
+# There is no publish-straight-to-Latest option: a full release with no
+# verified-train marker counts as approved for every train (that is how
+# releases from before per-train sign-off stay installable), so it would
+# reach every box untested.
 
 on:
   workflow_dispatch:
-    inputs:
-      mark_latest:
-        description: 'true = publish straight to Latest; false (default) = prerelease + hardware-test gate'
-        required: false
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-        default: 'false'
 
 permissions:
   contents: write
@@ -99,28 +101,44 @@ jobs:
         env:
           RUN_NUMBER: ${{ github.run_number }}
           COMMIT_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          MIG_MIN_DRIVER: ${{ steps.mig_min.outputs.min_driver_major }}
         run: |
+          TRAINS=$(python3 -c 'import json; print(", ".join(t["name"] for t in json.load(open(".github/tracked-versions.json"))["trains"]))')
+          GET="https://raw.githubusercontent.com/${REPO}/main/get.sh"
           cat > release-notes.md <<EOF
           Enables NVIDIA MIG support and MIG-device container mapping on TrueNAS.
 
           \`nvidia-mig.raw\` is a lightweight, driver- and kernel-agnostic sysext
-          (\`ID=_any\`) — it layers MIG tooling on top of whatever NVIDIA driver is
+          (\`ID=_any\`): it layers MIG tooling on top of whatever NVIDIA driver is
           already present and needs no reboot.
 
-          Install (MIG on the existing driver):
-          \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-mig-sysext.sh | sudo bash\`
+          This release starts as a pre-release. A hardware test on a TrueNAS train
+          (${TRAINS}) approves it for that train's boxes only; until then the
+          one-liner keeps installing the newest release approved for each train.
 
-          MIG requires a driver new enough to expose it (major >= 570 — the driver
+          Install (the newest release approved for your TrueNAS train, MIG on the existing driver):
+          \`curl -fsSL ${GET} | sudo bash\`
+
+          Pin this exact build:
+          \`curl -fsSL ${GET} | sudo bash -s -- --release=v${RUN_NUMBER}\`
+
+          MIG requires a driver new enough to expose it (major >= ${MIG_MIN_DRIVER}, the driver
           shipped in the latest TrueNAS 25). To run a newer/specific driver, install
-          it first via [nvidia-driver-support](https://github.com/${{ github.repository_owner }}/nvidia-driver-support), then install MIG on top.
+          it first via [nvidia-driver-support](https://github.com/${OWNER}/nvidia-driver-support), then install MIG on top.
 
           - Run number:    ${RUN_NUMBER}
           - Source commit: \`${COMMIT_SHA}\`
           EOF
+          echo "=== release-notes.md ==="; cat release-notes.md
 
       # Create the release as a DRAFT first. On immutable-release repos GitHub
       # only accepts asset uploads before a release is published, so we attach
-      # nvidia-mig.raw to the draft, then publish it in the next step.
+      # the assets to the draft, then publish it in the next step. get.sh runs
+      # the approved release's own install-mig-sysext.sh (or, with
+      # --uninstall, uninstall-mig-sysext.sh), so both are attached with the
+      # raw.
       - name: Create draft release with assets
         id: release
         uses: softprops/action-gh-release@v3
@@ -131,35 +149,28 @@ jobs:
           files: |
             dist/nvidia-mig.raw
             dist/nvidia-mig.raw.sha256
-          # install-mig-sysext.sh hard-requires the .sha256 sidecar, so a
-          # release missing either asset must fail here, not at install time.
+            scripts/install-mig-sysext.sh
+            scripts/uninstall-mig-sysext.sh
+          # install-mig-sysext.sh hard-requires the .sha256 sidecar, and get.sh
+          # runs the release's scripts, so a release missing any asset must
+          # fail here, not at install time.
           fail_on_unmatched_files: true
           draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Publish the draft. Default (mark_latest=false): publish as a PRERELEASE
-      # gated behind a hardware-test issue (promote.yml flips it to Latest when
-      # the issue is closed). Override mark_latest=true: publish straight to
-      # Latest. Editing these flags is allowed even on immutable releases; only
-      # the assets/tag are locked once published.
-      - name: Publish the draft
+      # Publish the draft as a prerelease, always: it is approved per train
+      # only by that train's hardware-test issue (promote.yml). Editing these
+      # flags is allowed even on immutable releases; only the assets/tag are
+      # locked once published.
+      - name: Publish the draft as a prerelease
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           REL_ID: ${{ steps.release.outputs.id }}
-          MARK_LATEST: ${{ inputs.mark_latest }}
-        run: |
-          if [ "$MARK_LATEST" = "true" ]; then
-            gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -f make_latest=true
-            echo "Published v${{ github.run_number }} straight to Latest"
-          else
-            gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -F prerelease=true
-            echo "Published v${{ github.run_number }} as a prerelease (hardware-test gate)"
-          fi
+        run: gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -F prerelease=true
 
-      - name: Open hardware-test issue (prerelease gate)
-        if: inputs.mark_latest != 'true'
+      - name: Open hardware-test issues, one per train (prerelease gate)
         uses: actions/github-script@v9
         env:
           RUN_NUMBER: ${{ github.run_number }}
@@ -169,76 +180,114 @@ jobs:
             const tag = `v${process.env.RUN_NUMBER}`;
             const { owner, repo } = context.repo;
             const releaseUrl = `https://github.com/${owner}/${repo}/releases/tag/${tag}`;
-            // Title: what to test | on what | which build. The tag goes last,
-            // verbatim: the duplicate check below matches on it.
-            const title = `Hardware test: NVIDIA MIG tooling ${tag} | MIG-capable NVIDIA GPU, driver ${process.env.MIG_MIN_DRIVER}+, TrueNAS 25.10+ or 26 beta | ${tag}`;
-            try {
-              await github.rest.issues.createLabel({ owner, repo, name: 'hardware-test',
-                color: 'FBCA04', description: 'Build awaiting verification on real hardware' });
-            } catch (e) { if (e.status !== 422) throw e; }
-            const existing = await github.rest.issues.listForRepo({ owner, repo,
-              state: 'open', labels: 'hardware-test', per_page: 100 });
-            if (existing.data.some(i => i.title.includes(tag))) {
-              console.log(`Open hardware-test issue already exists for ${tag}, skipping`); return;
+            const fs = require('fs');
+            // One issue per supported TrueNAS train: a hardware test approves this
+            // release for its own train's boxes only (promote.yml). Stable trains use
+            // the hardware-test label, preview (beta) trains preview-hardware-test.
+            const { trains } = JSON.parse(fs.readFileSync('.github/tracked-versions.json', 'utf8'));
+            const labelOf = (t) => (t.channel === 'preview' ? 'preview-hardware-test' : 'hardware-test');
+            const labels = {
+              'hardware-test': { color: 'FBCA04',
+                description: 'Build awaiting verification on real hardware' },
+              'preview-hardware-test': { color: '5319E7',
+                description: 'Build awaiting verification on real hardware, on a TrueNAS preview (beta) train' },
+            };
+            for (const name of new Set(trains.map(labelOf))) {
+              try {
+                await github.rest.issues.createLabel({ owner, repo, name, ...labels[name] });
+              } catch (e) { if (e.status !== 422) throw e; }
             }
-            // Test instructions. Every command must work exactly as written on
-            // a TrueNAS box: a human validator pastes them. The one-liner runs
-            // main's install-mig-sysext.sh (what users run); --release pins the
-            // nvidia-mig.raw download and the PREINIT script to this tag.
-            const inst = `https://raw.githubusercontent.com/${owner}/${repo}/main/scripts/install-mig-sysext.sh`;
+            // Duplicate check, keyed on tag AND train: an open issue whose markers
+            // (or title) name both already covers the pair. An open issue for this tag
+            // with no train marker and no train in its title is the single issue from
+            // before per-train sign-off: it covered every train (promote.yml still
+            // approves it for all of them), so it suppresses them all.
+            const open = [];
+            for (const name of Object.keys(labels)) {
+              open.push(...(await github.rest.issues.listForRepo({ owner, repo,
+                state: 'open', labels: name, per_page: 100 })).data);
+            }
+            const issueTag = (i) => ((i.body || '').match(/<!--\s*release-tag:\s*(\S+?)\s*-->/) || [])[1] || '';
+            const issueTrain = (i) => ((i.body || '').match(/<!--\s*train:\s*(\S+?)\s*-->/) || [])[1] || '';
+            const covers = (i, t) => {
+              if (issueTag(i) !== tag && !i.title.endsWith(` ${tag}`)) return false;
+              if (issueTrain(i)) return issueTrain(i) === t.key;
+              const named = trains.find((x) => i.title.includes(`, ${x.name} |`));
+              return named ? named.key === t.key : true;
+            };
+            // Test instructions. Every command must work exactly as written on a
+            // TrueNAS box: a human validator pastes them. The one-liner runs main's
+            // get.sh (what users run); --release makes it run this release's installer,
+            // which downloads and verifies this release's nvidia-mig.raw.
+            const inst = `https://raw.githubusercontent.com/${owner}/${repo}/main/get.sh`;
             const base = `https://github.com/${owner}/${repo}/releases/download/${tag}`;
-            await github.rest.issues.create({ owner, repo, title, labels: ['hardware-test'],
-              body: [
-                `A new prerelease of the MIG tooling sysext needs verification before promotion to **Latest**.`,
-                ``,
-                `**Release:** [${tag}](${releaseUrl})`,
-                `<!-- release-tag: ${tag} -->`,
-                ``,
-                `### Requirements`,
-                `- A MIG-capable NVIDIA GPU (RTX PRO 6000 Blackwell confirmed; Workstation Edition cards switched to compute mode) on TrueNAS 25.10 or later. The sysext is driver- and kernel-agnostic, so this includes 26 betas.`,
-                `- An NVIDIA driver with major version >= 570 already running: the TrueNAS stock driver, or one from [nvidia-driver-support](https://github.com/${owner}/nvidia-driver-support) (install it and reboot first). The installer refuses older drivers.`,
-                `- Installing needs no reboot; step 4 reboots to prove the PREINIT recreates the MIG instances before apps start.`,
-                ``,
-                `### 1. Pre-checks`,
-                "```bash",
-                `nvidia-smi --query-gpu=name,driver_version,mig.mode.current --format=csv,noheader   # driver major >= 570`,
-                `nvidia-smi -L                          # note the current GPU / MIG device list`,
-                "```",
-                ``,
-                `### 2. Install this build`,
-                `It is a pre-release, so the default install fetches the current Latest. Pin this build with \`--release\`:`,
-                "```bash",
-                `I=${inst}`,
-                `curl -fsSL "$I" | sudo bash -s -- --release=${tag} --dry-run   # downloads this tag's nvidia-mig.raw, ends "Dry-run complete"`,
-                `curl -fsSL "$I" | sudo bash -s -- --release=${tag}             # add --pool=NAME if it asks; ends "Install complete"`,
-                `sudo configure-mig                     # ONLY if the installer said "ready to configure NOW" (no mig.conf yet)`,
-                "```",
-                ``,
-                `### 3. Verify`,
-                "```bash",
-                `curl -fsSL "$I" | sudo bash -s -- --check   # Checks: ... 0 fail`,
-                `curl -fsSL ${base}/nvidia-mig.raw.sha256    # expected hash`,
-                `sudo sha256sum /mnt/*/.config/nvidia-gpu/nvidia-mig.raw   # same hash = this build is installed`,
-                `nvidia-smi -L                               # one "MIG ..." line per configured instance`,
-                "```",
-                ``,
-                `### 4. Reboot and re-verify`,
-                "```bash",
-                `sudo reboot`,
-                "```",
-                `After it is back up:`,
-                "```bash",
-                `I=${inst}`,
-                `curl -fsSL "$I" | sudo bash -s -- --check   # 0 fail, incl. "docker.service ordered after nvidia-mig-setup.service"`,
-                `systemctl is-active nvidia-mig-setup        # active`,
-                `nvidia-smi -L                               # same MIG instances as before the reboot`,
-                `sudo journalctl -b -t nvidia-mig-preinit --no-pager -o cat | grep -E '^(WARN|Done)'   # just "Done"`,
-                `sudo docker ps --format '{{.Names}}\\t{{.Status}}'                # MIG-bound apps Up, not Restarting`,
-                "```",
-                ``,
-                `### 5. Report and sign off`,
-                `Comment with \`cat /etc/version\`, the GPU and driver from step 1, your MIG layout, and the step 4 output of \`--check\` and \`nvidia-smi -L\`.`,
-                `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to Latest (what the default install fetches) and appends the changelog.`,
-                `- Broken: comment what failed, then close as **not planned**. The release stays an unpromoted pre-release.`,
-              ].join('\n') });
-            console.log(`Created hardware-test issue for ${tag}`);
+            for (const t of trains) {
+              const preview = t.channel === 'preview';
+              // Title: what to test | on what | which build. The train names the "on
+              // what"; the tag goes last, verbatim.
+              const title = `${preview ? 'Preview hardware test' : 'Hardware test'}: NVIDIA MIG tooling ${tag} | MIG-capable NVIDIA GPU, driver ${process.env.MIG_MIN_DRIVER}+, ${t.name} | ${tag}`;
+              const dup = open.find((i) => covers(i, t));
+              if (dup) {
+                console.log(`Open issue #${dup.number} already covers ${tag} on ${t.name}, skipping`);
+                continue;
+              }
+              const others = trains.filter((x) => x.key !== t.key).map((x) => x.name);
+              await github.rest.issues.create({ owner, repo, title, labels: [labelOf(t)],
+                body: [
+                  `A new prerelease of the MIG tooling sysext needs verification. This issue approves it for **${t.name}** boxes only: verify it **on real hardware, on a ${t.name} box**.${others.length ? ` ${others.join(', ')} ${others.length > 1 ? 'have their own issues' : 'has its own issue'} for this release.` : ''}`,
+                  ``,
+                  `**Release:** [${tag}](${releaseUrl})`,
+                  `**Train:** ${t.name} (\`cat /etc/version\` starts with \`${t.key}.\`)`,
+                  `<!-- release-tag: ${tag} -->`,
+                  `<!-- train: ${t.key} -->`,
+                  ``,
+                  `### Requirements`,
+                  `- A ${t.name} box with a MIG-capable NVIDIA GPU (RTX PRO 6000 Blackwell confirmed; Workstation Edition cards switched to compute mode). The sysext is driver- and kernel-agnostic, so there is no kernel pin.`,
+                  `- An NVIDIA driver with major version >= ${process.env.MIG_MIN_DRIVER} already running: the TrueNAS stock driver, or one from [nvidia-driver-support](https://github.com/${owner}/nvidia-driver-support) (install it and reboot first). The installer refuses older drivers.`,
+                  `- Installing needs no reboot; step 4 reboots to prove the PREINIT recreates the MIG instances before apps start.`,
+                  ``,
+                  `### 1. Pre-checks`,
+                  "```bash",
+                  `cat /etc/version                       # starts with ${t.key}. (this issue's train)`,
+                  `nvidia-smi --query-gpu=name,driver_version,mig.mode.current --format=csv,noheader   # driver major >= ${process.env.MIG_MIN_DRIVER}`,
+                  `nvidia-smi -L                          # note the current GPU / MIG device list`,
+                  "```",
+                  ``,
+                  `### 2. Install this build`,
+                  `No hardware test has approved it for ${t.name} yet, so plain \`get.sh\` would install the newest approved release instead. Pin this build with \`--release\`:`,
+                  "```bash",
+                  `I=${inst}`,
+                  `curl -fsSL "$I" | sudo bash -s -- --release=${tag} --dry-run   # downloads this tag's nvidia-mig.raw, ends "Dry-run complete"`,
+                  `curl -fsSL "$I" | sudo bash -s -- --release=${tag}             # add --pool=NAME if it asks; ends "Install complete"`,
+                  `sudo configure-mig                     # ONLY if the installer said "ready to configure NOW" (no mig.conf yet)`,
+                  "```",
+                  ``,
+                  `### 3. Verify`,
+                  "```bash",
+                  `curl -fsSL "$I" | sudo bash -s -- --release=${tag} --check   # Checks: ... 0 fail`,
+                  `curl -fsSL ${base}/nvidia-mig.raw.sha256    # expected hash`,
+                  `sudo sha256sum /mnt/*/.config/nvidia-gpu/nvidia-mig.raw   # same hash = this build is installed`,
+                  `nvidia-smi -L                               # one "MIG ..." line per configured instance`,
+                  "```",
+                  ``,
+                  `### 4. Reboot and re-verify`,
+                  "```bash",
+                  `sudo reboot`,
+                  "```",
+                  `After it is back up:`,
+                  "```bash",
+                  `I=${inst}`,
+                  `curl -fsSL "$I" | sudo bash -s -- --release=${tag} --check   # 0 fail, incl. "docker.service ordered after nvidia-mig-setup.service"`,
+                  `systemctl is-active nvidia-mig-setup        # active`,
+                  `nvidia-smi -L                               # same MIG instances as before the reboot`,
+                  `sudo journalctl -b -t nvidia-mig-preinit --no-pager -o cat | grep -E '^(WARN|Done)'   # just "Done"`,
+                  `sudo docker ps --format '{{.Names}}\\t{{.Status}}'                # MIG-bound apps Up, not Restarting`,
+                  "```",
+                  ``,
+                  `### 5. Report and sign off`,
+                  `Comment with \`cat /etc/version\`, the GPU and driver from step 1, your MIG layout, and the step 4 output of \`--check\` and \`nvidia-smi -L\`. Sign off here only for a test on ${t.name}.`,
+                  `- Works: close this issue as **completed**. That approves [\`${tag}\`](${releaseUrl}) for ${t.name} boxes: promote.yml adds a \`verified-train: ${t.key}\` marker to its notes, and \`get.sh\` then installs it there. The first train to approve a release also makes it a full release and appends the changelog.`,
+                  `- Broken: comment what failed, then close as **not planned**. Nothing changes: ${t.name} boxes keep the newest release approved for them. To go back to that release, re-run the install without \`--release\`: \`curl -fsSL ${inst} | sudo bash\`.`,
+                ].join('\n') });
+              console.log(`Created ${labelOf(t)} issue for ${tag} on ${t.name}`);
+            }

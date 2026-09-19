@@ -4,6 +4,15 @@ Common failure modes and what to do about them. For background on how each piece
 
 This repo handles only the MIG layer. Driver problems (building, swapping, surviving updates) belong to [nvidia-driver-support](https://github.com/truenas-community-sysexts/nvidia-driver-support).
 
+## `No release is approved for TrueNAS train <train> yet`
+
+`get.sh` (and `install-mig-sysext.sh` run without `--release`) only installs a release that a hardware test approved for this box's TrueNAS train: the train is the major version from 26 on (every 26.x, betas included) and major.minor before that (25.10). No release is approved for this train yet, so it stopped rather than install something untested. The message lists the newest releases still waiting and links the open hardware-test issues; each issue title names its train. Testing one on this train and closing it as completed approves that release here. To install a specific release anyway, pin it (at your own risk):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/get.sh \
+  | sudo bash -s -- --release=vN
+```
+
 ## GPU/MIG apps are `CRASHED` after every reboot (`failed to get device handle from UUID: Not Found`)
 
 **Symptom:** after a reboot, non-GPU apps come back fine but every app assigned a MIG device is `CRASHED`. `docker inspect` on the container shows:
@@ -21,7 +30,7 @@ The MIG UUIDs in `nvidia-smi -L` match the apps' saved assignments exactly — s
 **Fix:** `nvidia-mig-setup.service` declares `Before=docker.service` (the same convention the sibling hailo/coral sysexts use), so dockerd waits for MIG instance creation before restarting the GPU containers. If you're crashing on boot, your installed `nvidia-mig.raw` predates this fix — update and re-run the install:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/get.sh | sudo bash
 ```
 
 Verify the ordering is in effect (should list `nvidia-mig-setup.service`):
@@ -64,7 +73,7 @@ $ journalctl -u nvidia-mig-setup.service -b 0
 **Fix:** Re-run the install — it will (re-)create the PREINIT entry:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/get.sh | sudo bash
 ```
 
 Verify the PREINIT registration directly:
@@ -166,5 +175,5 @@ Or via the TrueNAS UI: Apps → app → Edit → Resources → NVIDIA GPU → pi
 If you genuinely want to try MIG on an older driver, bypass the gate:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/scripts/install-mig-sysext.sh | sudo bash -s -- --force
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/get.sh | sudo bash -s -- --force
 ```
