@@ -36,6 +36,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The hardware-test issue title names the MIG driver floor. Read it from
+      # the installer's MIN_DRIVER_MAJOR (the floor its --check enforces), and
+      # fail here, before anything is published, if that constant moves.
+      - name: Read the MIG minimum driver major
+        id: mig_min
+        run: |
+          MIN=$(sed -n 's/^MIN_DRIVER_MAJOR=\([0-9][0-9]*\)$/\1/p' scripts/install-mig-sysext.sh)
+          if [ -z "$MIN" ]; then
+            echo "::error title=mig-min::no MIN_DRIVER_MAJOR=<number> line in scripts/install-mig-sysext.sh; the hardware-test issue title reads the MIG driver floor from it."
+            exit 1
+          fi
+          echo "min_driver_major=${MIN}" >> "$GITHUB_OUTPUT"
+
       - name: Install squashfs-tools
         run: sudo apt-get update && sudo apt-get install -y squashfs-tools
 
@@ -150,12 +163,15 @@ jobs:
         uses: actions/github-script@v9
         env:
           RUN_NUMBER: ${{ github.run_number }}
+          MIG_MIN_DRIVER: ${{ steps.mig_min.outputs.min_driver_major }}
         with:
           script: |
             const tag = `v${process.env.RUN_NUMBER}`;
             const { owner, repo } = context.repo;
             const releaseUrl = `https://github.com/${owner}/${repo}/releases/tag/${tag}`;
-            const title = `Hardware test: nvidia-mig ${tag}`;
+            // Title: what to test | on what | which build. The tag goes last,
+            // verbatim: the duplicate check below matches on it.
+            const title = `Hardware test: NVIDIA MIG tooling ${tag} | MIG-capable NVIDIA GPU, driver ${process.env.MIG_MIN_DRIVER}+, TrueNAS 25.10+ or 26 beta | ${tag}`;
             try {
               await github.rest.issues.createLabel({ owner, repo, name: 'hardware-test',
                 color: 'FBCA04', description: 'Build awaiting verification on real hardware' });
