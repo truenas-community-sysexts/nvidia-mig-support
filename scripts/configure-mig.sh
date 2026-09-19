@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Configure MIG layout + map MIG devices to TrueNAS apps.
 #
-# Runs after install-mig-sysext.sh (default path: no reboot) or after the
-# reboot following install-mig-sysext.sh --with-driver. Either path is fine —
-# by the time configure-mig.sh runs, /usr/bin/nvidia-smi must work and
-# middleware must be up.
+# Runs after install-mig-sysext.sh (no reboot needed). By the time
+# configure-mig.sh runs, /usr/bin/nvidia-smi must work and middleware must
+# be up.
 #
 # Usage:
 #   sudo ./configure-mig.sh                        # interactive: prompt for profiles
@@ -226,7 +225,7 @@ profile_label_from_name() {
 
 # --- Resolve persistent dir ---
 # resolve_persist_dir is duplicated verbatim across install-mig-sysext.sh,
-# configure-mig.sh, and recover-stock-nvidia.sh. Inline (rather than
+# configure-mig.sh, and uninstall-mig-sysext.sh. Inline (rather than
 # sourced from a sibling file) so each script remains a self-contained
 # curl|bash artifact. Keep these copies in sync when changing the function.
 resolve_persist_dir() {
@@ -303,6 +302,20 @@ resolve_persist_dir() {
         echo "  Invalid. Enter 1-${#choices[@]}."
     done
 }
+# Validate --persist-path shape: MIG persistence only scans
+# /mnt/*/.config/nvidia-gpu, so any other location silently breaks it after a
+# reboot or TrueNAS update. Refuse early. --pool resolves to this shape
+# automatically.
+if [ -n "$PERSIST_PATH" ]; then
+    PERSIST_PATH_REAL=$(realpath -m "$PERSIST_PATH" 2>/dev/null || echo "$PERSIST_PATH")
+    if [[ ! "$PERSIST_PATH_REAL" =~ ^/mnt/[^/]+/\.config/nvidia-gpu/?$ ]]; then
+        echo "ERROR: --persist-path must be /mnt/<pool>/.config/nvidia-gpu (got: ${PERSIST_PATH})" >&2
+        echo "  MIG persistence only scans /mnt/*/.config/nvidia-gpu," >&2
+        echo "  so any other location silently breaks it after a reboot or update." >&2
+        echo "  Pass --pool=<name> instead (it resolves to /mnt/<name>/.config/nvidia-gpu)." >&2
+        exit 2
+    fi
+fi
 resolve_persist_dir || exit 1
 mkdir -p "$PERSIST_DIR"
 
@@ -327,8 +340,9 @@ else
     if echo "$NVIDIA_ERR" | grep -qi "version mismatch"; then
         echo "" >&2
         echo "ERROR: kernel modules and userspace libraries are different driver versions." >&2
-        echo "       This is expected immediately after 'install-mig-sysext.sh --with-driver'" >&2
-        echo "       and resolves itself after a reboot loads matching kernel modules." >&2
+        echo "       This happens right after a driver swap (e.g. installing a driver via" >&2
+        echo "       nvidia-driver-support) and resolves itself after a reboot loads" >&2
+        echo "       matching kernel modules." >&2
         echo "" >&2
         echo "       Reboot first, then re-run configure-mig:" >&2
         echo "" >&2
@@ -570,7 +584,10 @@ fi
 
 echo ""
 echo "  Disabling nvidia toolkit for docker (belt-and-suspenders)..."
-midclt call docker.update '{"nvidia": false}' >/dev/null \
+# -j: docker.update is a middleware job whose nvidia handler runs its own
+# `systemd-sysext refresh` and restarts docker. Without -j midclt returns at
+# once and that work overlaps the MIG teardown below.
+midclt call -j docker.update '{"nvidia": false}' >/dev/null \
     || echo "  WARN: docker.update returned an error — middleware may be flapping"
 
 # Short drain: app.stop -j already blocked on container teardown, so this
@@ -585,7 +602,8 @@ for attempt in $(seq 1 10); do
         printf "\r  GPU clients released                                    \n"
         break
     fi
-    printf "\r  Waiting for %d GPU process(es)... %ds/30s" "$N" "$((attempt * 3))"
+    # Fixed-width field clears the placeholder line above (bare \r leaves its tail).
+    printf "\r  %-44s" "Waiting for $N GPU process(es)... $((attempt * 3))s/30s"
     sleep 3
 done
 
@@ -602,7 +620,7 @@ if [ "${N:-0}" -gt 0 ]; then
     echo "       manual nvidia-smi, jail/VM passthrough)." >&2
     echo "" >&2
     echo "       Re-enabling nvidia toolkit so apps come back, then exiting." >&2
-    midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+    midclt call -j docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
     exit 1
 fi
 
@@ -623,7 +641,7 @@ systemctl status nvidia-mig-setup.service --no-pager -n 0 | head -3 || true
 # --- Re-enable app services ---
 echo ""
 echo "Re-enabling app services..."
-midclt call docker.update '{"nvidia": true}' >/dev/null \
+midclt call -j docker.update '{"nvidia": true}' >/dev/null \
     || echo "WARN: app services API call (docker.update) re-enable failed"
 
 # --- Wait for apps to come back so we can list them ---
@@ -965,13 +983,78 @@ except: print('')" 2>/dev/null)
 
     # Build the payload with python3 (slot and uuid passed as argv) instead of
     # interpolating into a JSON string literal, to avoid quoting/escaping bugs.
-    payload=$(python3 -c '
+    #
+    # Alongside the universal nvidia_gpu_selection (which middleware turns into
+    # NVIDIA_VISIBLE_DEVICES), also pin CUDA_VISIBLE_DEVICES=<MIG-UUID> in the
+    # app's additional_envs. A *privileged* container makes the NVIDIA toolkit
+    # IGNORE NVIDIA_VISIBLE_DEVICES (it sees every MIG instance, and CUDA then
+    # defaults to device 0 — frequently the wrong instance, e.g. a -me compute
+    # slice with no NVDEC, which silently kills ffmpeg/Frigate). CUDA_VISIBLE_-
+    # DEVICES is enforced by the CUDA driver *inside* the container, so it pins
+    # the correct instance regardless of privileged, and it shows up in the
+    # app's Edit UI under "Additional Environment Variables". For a
+    # non-privileged app it's a harmless no-op (it just matches the assigned MIG).
+    #
+    # CRITICAL: app.update does NOT deep-merge. For any top-level group it
+    # receives, it REPLACES the whole group with what you send and fills schema
+    # DEFAULTS for every field you omit. So a partial write like
+    # {"frigate": {"additional_envs": [...]}} silently wipes the app's other
+    # settings (devices/passthroughs, shm_size_mb, privileged, ...) back to
+    # defaults. To touch additional_envs safely we must read the CURRENT full
+    # group and send it back intact, changing only additional_envs.
+    #
+    # additional_envs lives at an app-specific path (almost always
+    # <app>.additional_envs), so read the current config and DFS for it, then
+    # send that ENTIRE top-level group back (with stale CUDA_VISIBLE_DEVICES
+    # replaced). resources gets the same read-modify-write treatment so its
+    # limits (and any other sub-keys) aren't re-defaulted either.
+    cur_config=$(midclt call app.config "$app" 2>/dev/null || echo '{}')
+    payload=$(printf '%s' "$cur_config" | python3 -c '
 import json, sys
+cfg = json.load(sys.stdin)
 slot, uuid = sys.argv[1], sys.argv[2]
-print(json.dumps({"values": {"resources": {"gpus": {
-    "use_all_gpus": False,
-    "nvidia_gpu_selection": {slot: {"use_gpu": True, "uuid": uuid}},
-}}}}))
+
+# resources: read-modify-write the full existing group (preserve limits and
+# any other sub-keys), changing only the GPU selection. Falls back to a bare
+# gpus block for an app that has no resources config yet.
+resources = cfg.get("resources") or {}
+gpus = resources.get("gpus") or {}
+gpus["use_all_gpus"] = False
+gpus["nvidia_gpu_selection"] = {slot: {"use_gpu": True, "uuid": uuid}}
+resources["gpus"] = gpus
+values = {"resources": resources}
+
+def find_envs(node, path):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "additional_envs" and (isinstance(v, list) or v is None):
+                return path + [k], v
+            r = find_envs(v, path + [k])
+            if r:
+                return r
+    return None
+
+found = find_envs(cfg, [])
+if found:
+    env_path, env_list = found
+    env_list = [e for e in (env_list or [])
+                if not (isinstance(e, dict) and e.get("name") == "CUDA_VISIBLE_DEVICES")]
+    env_list.append({"name": "CUDA_VISIBLE_DEVICES", "value": uuid})
+    # Write the modified list back into the FULL config subtree, then send the
+    # whole top-level group it lives in (read-modify-write) so no sibling field
+    # (devices, shm_size_mb, privileged, ...) gets reset to its default.
+    node = cfg
+    for key in env_path[:-1]:
+        node = node[key]
+    node[env_path[-1]] = env_list
+    top = env_path[0]
+    values[top] = cfg[top]
+    sys.stderr.write("    + CUDA_VISIBLE_DEVICES via %s (full group preserved)\n" % ".".join(env_path))
+else:
+    sys.stderr.write("    ! app has no additional_envs field; skipped CUDA_VISIBLE_DEVICES "
+                     "(only needed if you run this app privileged)\n")
+
+print(json.dumps({"values": values}))
 ' "$PCI_SLOT" "${STAGED_UUID[$i]}")
     if run_with_elapsed_capture "    Applying GPU config" midclt call -j app.update "$app" "$payload"; then
         echo "    Applying GPU config... OK (${ELAPSED}s)"

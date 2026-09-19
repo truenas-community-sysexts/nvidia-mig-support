@@ -8,6 +8,15 @@ Description=NVIDIA MIG Instance Setup
 # (when nvidia-preinit-driver runs concurrently from install-sysext.sh
 # --with-driver), and the udev/modprobe module-load race.
 After=systemd-sysext.service local-fs.target
+# Order before dockerd so GPU/MIG containers (restart=unless-stopped) don't
+# restart onto a not-yet-created MIG device and crash at task creation with
+# "failed to get device handle from UUID: Not Found". MIG instances don't
+# survive a reboot, so this race is hit on every boot, not just driver swaps.
+# Matches the sibling sysexts (hailo-load.service, coral-load.service), which
+# order themselves Before=docker.service the same way. Deadlock-safe: instance
+# creation precedes this service's bounded (25s) middleware wait, and it never
+# blocks boot, so docker is always released. See docs/troubleshooting.md.
+Before=docker.service
 
 [Service]
 Type=oneshot

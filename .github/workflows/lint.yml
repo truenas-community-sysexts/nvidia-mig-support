@@ -5,15 +5,11 @@ on:
     branches: [main]
     paths:
       - 'scripts/**.sh'
-      - '.github/scripts/**.sh'
       - '.github/workflows/**.yml'
-      - '.github/tracked-versions.json'
   pull_request:
     paths:
       - 'scripts/**.sh'
-      - '.github/scripts/**.sh'
       - '.github/workflows/**.yml'
-      - '.github/tracked-versions.json'
   workflow_dispatch:
 
 permissions:
@@ -24,32 +20,21 @@ jobs:
     name: shellcheck shell scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run shellcheck
         run: |
           shellcheck --severity=warning \
-            scripts/build-nvidia-sysext.sh \
             scripts/build-mig-sysext.sh \
-            scripts/build-on-host.sh \
             scripts/install-mig-sysext.sh \
+            scripts/nvidia-mig-preinit.sh \
             scripts/uninstall-mig-sysext.sh \
-            scripts/configure-mig.sh \
-            scripts/recover-stock-nvidia.sh \
-            scripts/nvidia-preinit-driver.sh \
-            .github/scripts/*.sh
-
-  tracked-versions:
-    name: tracked-versions.json shape
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - run: .github/scripts/validate-tracked-versions.sh
+            scripts/configure-mig.sh
 
   actionlint:
     name: actionlint workflows
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download actionlint
         # Pinned download script from upstream. actionlint auto-runs
         # shellcheck against `run:` blocks when shellcheck is on PATH —
