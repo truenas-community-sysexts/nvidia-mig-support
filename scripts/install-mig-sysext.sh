@@ -575,8 +575,17 @@ echo "MIG sysext:     $MIG_SRC"
 echo ""
 
 # Copy the MIG sysext to persistent storage so TrueNAS updates can be survived.
-if_real cp "$MIG_SRC" "${PERSIST_DIR}/nvidia-mig.raw"
-$DRY_RUN || echo "Copied MIG sysext to ${PERSIST_DIR}/nvidia-mig.raw"
+# --sysext may name the persistent copy itself (re-activating it after a major
+# TrueNAS upgrade wiped the merge and the /etc/extensions symlink but left the
+# pool untouched). cp refuses to copy a file onto itself, and the file is
+# already in place, so skip it. -ef compares device + inode, so a symlink or
+# hardlink to the persistent copy is caught too, not just the literal path.
+if [ "$MIG_SRC" -ef "${PERSIST_DIR}/nvidia-mig.raw" ]; then
+    echo "MIG sysext is already the persistent copy at ${PERSIST_DIR}/nvidia-mig.raw; skipping copy."
+else
+    if_real cp "$MIG_SRC" "${PERSIST_DIR}/nvidia-mig.raw"
+    $DRY_RUN || echo "Copied MIG sysext to ${PERSIST_DIR}/nvidia-mig.raw"
+fi
 
 # Ensure /etc/extensions/ symlinks for both sysexts. nvidia.raw is the driver
 # already present (stock or installed via nvidia-driver-support); nvidia-mig.raw
@@ -665,6 +674,12 @@ stage_mig_preinit() {
         dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || dir=""
     fi
     if [ -n "$dir" ] && [ -f "${dir}/nvidia-mig-preinit.sh" ]; then
+        # Run from the persist dir itself: the sibling is the destination,
+        # and cp would refuse to copy it onto itself.
+        if [ "${dir}/nvidia-mig-preinit.sh" -ef "$dest" ]; then
+            echo "nvidia-mig-preinit.sh is already at ${dest}; skipping copy."
+            return 0
+        fi
         if_real cp "${dir}/nvidia-mig-preinit.sh" "$dest" || return 1
         return 0
     fi
