@@ -12,6 +12,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from urllib.parse import urlparse
 
 from release_fixtures import release
 
@@ -20,15 +21,40 @@ GET_SH = ROOT / "get.sh"
 INSTALL_SH = ROOT / "scripts" / "install-mig-sysext.sh"
 REPO = "truenas-community-sysexts/nvidia-mig-support"
 
+# A raw.githubusercontent.com URL in a script, capturing what follows the
+# host so the tag guard below can check that tail instead of testing a line
+# for a bare hostname substring.
+RAW_URL = re.compile(r"raw\.githubusercontent\.com/(\S*)")
+
+
+def logged_host(line):
+    """Hostname of the URL in a stub-log line ("curl <url>"), or "" for other lines."""
+    parts = line.split()
+    if len(parts) > 1 and parts[0] == "curl":
+        return urlparse(parts[1]).hostname or ""
+    return ""
+
+
+def logged_path(line):
+    """Path of the URL in a stub-log line ("curl <url>"), or "" for other lines."""
+    parts = line.split()
+    if len(parts) > 1 and parts[0] == "curl":
+        return urlparse(parts[1]).path
+    return ""
+
+
 # STUB_NO_ASSETS: tags whose release has no script assets (published before
 # get.sh). STUB_NO_TREE: tags whose source has no such file either.
 CURL_STUB = textwrap.dedent("""\
     #!/usr/bin/env python3
     import json, os, re, sys
+    from urllib.parse import urlparse
     args = sys.argv[1:]
     url = args[-1]
     with open(os.environ["STUB_LOG"], "a") as f:
         f.write("curl " + url + "\\n")
+    parsed = urlparse(url)
+    host, path = parsed.hostname, parsed.path
     def tags(name):
         return [t for t in os.environ.get(name, "").split(",") if t]
     def fake(name, ref):
@@ -36,21 +62,21 @@ CURL_STUB = textwrap.dedent("""\
             f.write('#!/usr/bin/env bash\\n'
                     'echo "dir $(ls -A "$(dirname "$0")" | tr "\\\\n" " ")" >> "$STUB_LOG"\\n'
                     f'echo "RAN {name} from {ref} with: $*"\\n')
-    if "api.github.com" in url:
-        page = int(re.search(r"[?&]page=(\\d+)", url).group(1))
+    if host == "api.github.com":
+        page = int(re.search(r"(?:^|&)page=(\\d+)", parsed.query).group(1))
         pages = json.load(open(os.environ["STUB_PAGES"]))
         print(json.dumps(pages[page - 1] if page <= len(pages) else []))
-    elif "/releases/download/" in url:
-        tag, asset = url.split("/releases/download/")[1].split("/")
+    elif host == "github.com" and "/releases/download/" in path:
+        tag, asset = path.split("/releases/download/")[1].split("/")
         if tag in tags("STUB_NO_ASSETS"):
             sys.exit(22)
         fake(asset, tag)
-    elif "raw.githubusercontent.com/" in url:
-        parts = url.split("raw.githubusercontent.com/")[1].split("/")
-        ref, path = parts[2], "/".join(parts[3:])
+    elif host == "raw.githubusercontent.com":
+        parts = path.lstrip("/").split("/")
+        ref, name = parts[2], parts[-1]
         if ref in tags("STUB_NO_TREE"):
             sys.exit(22)
-        fake(path.split("/")[-1], ref)
+        fake(name, ref)
     else:
         sys.exit(22)
     """)
@@ -129,7 +155,8 @@ class GetSh(Stubbed):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.strip(),
                          "RAN install-mig-sysext.sh from v81 with: --check --release=v81")
-        self.assertFalse(any(c.startswith("midclt") or "api.github.com" in c
+        self.assertFalse(any(c.startswith("midclt")
+                             or logged_host(c) == "api.github.com"
                              for c in self.calls()), self.calls())
 
     def test_pinned_uninstall(self):
@@ -175,8 +202,9 @@ class GetSh(Stubbed):
                      releases=[release("v81", prerelease=True)])
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("No release is approved for TrueNAS train 26 yet", p.stderr)
-        self.assertFalse(any("/releases/download/" in c or "raw.githubusercontent" in c
-                             for c in self.calls()))
+        self.assertFalse(any("/releases/download/" in logged_path(c)
+                             or logged_host(c) == "raw.githubusercontent.com"
+                             for c in self.calls()), self.calls())
 
     def test_unreadable_truenas_version_is_an_error(self):
         p = self.get(version="")
@@ -267,8 +295,8 @@ class InstallerResolve(Stubbed):
         # No approved release: nothing is staged, and main is not a fallback.
         p = self.preinit("26.1.0", releases=[release("v81", prerelease=True)])
         self.assertIn("not staged", p.stdout)
-        self.assertFalse(any("raw.githubusercontent" in c for c in self.calls()),
-                         self.calls())
+        self.assertFalse(any(logged_host(c) == "raw.githubusercontent.com"
+                             for c in self.calls()), self.calls())
 
 
 class NoUnapprovedSources(unittest.TestCase):
@@ -284,10 +312,9 @@ class NoUnapprovedSources(unittest.TestCase):
                 self.assertNotIn("releases/latest", ln, path.name)
                 self.assertNotIn("/main/", ln, path.name)
                 # A file at a git ref is fetched only at the release's tag.
-                if "raw.githubusercontent.com" in ln:
+                for tail in RAW_URL.findall(ln):
                     self.assertRegex(
-                        ln, r"raw\.githubusercontent\.com/\$\{REPO\}/\$\{(tag|RELEASE_TAG)\}/",
-                        path.name)
+                        tail, r"^\$\{REPO\}/\$\{(tag|RELEASE_TAG)\}/", path.name)
 
 
 class HelpText(unittest.TestCase):
