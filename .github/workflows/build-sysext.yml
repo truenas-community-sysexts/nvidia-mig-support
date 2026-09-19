@@ -74,6 +74,7 @@ jobs:
           require_file "usr/bin/configure-mig"
           require_file "usr/bin/uninstall-nvidia-mig"
           require_file "usr/lib/systemd/system/nvidia-mig-setup.service"
+          require_file "usr/share/nvidia-mig/nvidia-mig-preinit.sh"
 
           if [ "$fail" -ne 0 ]; then
             echo "::error title=smoke-test::nvidia-mig.raw failed smoke-test — refusing to publish"
@@ -117,6 +118,9 @@ jobs:
           files: |
             dist/nvidia-mig.raw
             dist/nvidia-mig.raw.sha256
+          # install-mig-sysext.sh hard-requires the .sha256 sidecar, so a
+          # release missing either asset must fail here, not at install time.
+          fail_on_unmatched_files: true
           draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

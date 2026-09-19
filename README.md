@@ -23,7 +23,7 @@ sudo configure-mig
 
 TrueNAS bundles an NVIDIA driver, but doesn't ship the MIG setup glue: nothing creates instances at boot, nothing remaps app GPU UUIDs when MIG instances are recreated, and nothing makes that survive a TrueNAS update. This repo fills those gaps.
 
-A release carries one asset, `nvidia-mig.raw`:
+A release carries one payload asset, `nvidia-mig.raw`, plus its `nvidia-mig.raw.sha256` checksum (the installer requires both):
 
 | Contents | Touches `/usr`? | Reboot? |
 | --- | --- | --- |

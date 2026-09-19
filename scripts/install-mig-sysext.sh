@@ -98,6 +98,33 @@ if_real() {
     fi
 }
 
+# Resolve the repo's latest release into RELEASE_TAG (no-op when --release
+# pinned one). A plain GET with -L (some middleboxes mishandle HEAD) whose
+# body is discarded; follows redirects so a renamed repo still lands on the
+# /releases/tag/<tag> URL, and no GitHub API rate limits apply. Callers
+# choose their own severity on failure: this only leaves a NOTE.
+resolve_release_tag() {
+    [ -n "$RELEASE_TAG" ] && return 0
+    local final tag
+    final=$(curl -fsSL -o /dev/null --retry 3 --max-time 30 \
+        -w '%{url_effective}' "https://github.com/${REPO}/releases/latest") || final=""
+    tag=""
+    case "$final" in
+        */releases/tag/?*)
+            # Anchor on the path segment; proxies can append '/' or a query.
+            tag="${final##*/releases/tag/}"
+            tag="${tag%%\?*}"
+            tag="${tag%/}"
+            ;;
+    esac
+    if [ -z "$tag" ]; then
+        echo "NOTE: could not resolve the latest release tag (got '${final:-nothing}')" >&2
+        return 1
+    fi
+    RELEASE_TAG="$tag"
+    echo "Resolved latest release: ${RELEASE_TAG}"
+}
+
 # Read the driver version embedded in a sysext .raw via libnvidia-ml.so.X.Y.Z.
 read_raw_driver_version() {
     [ -f "$1" ] || return 0
@@ -475,28 +502,52 @@ resolve_persist_dir || exit 1
 if_real mkdir -p "$PERSIST_DIR"
 
 # --- Fetch nvidia-mig.raw if not provided ---
-# No release tag → the repo's latest release via the redirecting download URL.
-# --release=TAG → that exact tag.
+# The tag is resolved before anything downloads so the raw, its .sha256
+# sidecar, and the PREINIT script staged later all come from one release
+# instead of straddling a publish that lands mid-install.
 MIG_TMP=""
+# Single cleanup trap for any tempfile we create; armed before the download
+# so an interrupt mid-transfer doesn't orphan a multi-MB file in /tmp.
+# The `[ -z ] ||` shape matters: `[ -n ] &&` returns 1 when MIG_TMP is empty,
+# and under set -e a failing EXIT trap turns a successful --sysext install
+# into exit 1. Signals exit explicitly so the script cannot keep running
+# against a file the trap just deleted.
+cleanup_tmp() {
+    [ -z "${MIG_TMP:-}" ] || rm -f "$MIG_TMP"
+}
+trap cleanup_tmp EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 if [ -z "$MIG_SRC" ]; then
-    MIG_TMP=$(mktemp -t nvidia-mig.raw.XXXXXX)
-    if [ -n "$RELEASE_TAG" ]; then
-        MIG_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${MIG_ASSET}"
-    else
-        MIG_URL="https://github.com/${REPO}/releases/latest/download/${MIG_ASSET}"
+    resolve_release_tag || {
+        echo "ERROR: cannot resolve the latest release tag; pass --release=TAG to pin one explicitly" >&2
+        exit 1
+    }
+    MIG_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${MIG_ASSET}"
+    # Sidecar first (it is tiny; a missing one fails before the raw transfer).
+    # Buffered like MIG_LISTING below, then hash-field compare rather than
+    # `sha256sum -c`: the download lands in a mktemp name that can't match the
+    # filename recorded in the sidecar. The hex guard keeps a soft-404 HTML
+    # page from reading as a mismatch.
+    _sidecar=$(curl -fsSL --retry 3 --max-time 30 "${MIG_URL}.sha256") || _sidecar=""
+    _expected=$(printf '%s\n' "$_sidecar" | awk '{print $1; exit}')
+    if ! [[ "$_expected" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "ERROR: no usable ${MIG_ASSET}.sha256 on release ${RELEASE_TAG} (does that release exist and carry the sidecar?)" >&2
+        exit 1
     fi
+    MIG_TMP=$(mktemp -t nvidia-mig.raw.XXXXXX)
     echo "Downloading ${MIG_URL}"
-    curl -fL --retry 3 -o "$MIG_TMP" "$MIG_URL" \
-        || { echo "ERROR: failed to download nvidia-mig.raw" >&2; rm -f "$MIG_TMP"; exit 1; }
+    curl -fL --retry 3 --connect-timeout 15 -o "$MIG_TMP" "$MIG_URL" \
+        || { echo "ERROR: failed to download nvidia-mig.raw" >&2; exit 1; }
+    _actual=$(sha256sum "$MIG_TMP" | awk '{print $1}')
+    if [ "$_expected" != "$_actual" ]; then
+        echo "ERROR: SHA256 mismatch for ${MIG_ASSET}: expected ${_expected}, got ${_actual}" >&2
+        exit 1
+    fi
+    echo "SHA256 verified: ${_actual}"
     MIG_SRC="$MIG_TMP"
 fi
 [ -f "$MIG_SRC" ] || { echo "ERROR: MIG sysext source not found: $MIG_SRC" >&2; exit 1; }
-
-# Single cleanup trap for any tempfile we created.
-cleanup_tmp() {
-    [ -n "${MIG_TMP:-}" ] && rm -f "$MIG_TMP"
-}
-trap cleanup_tmp EXIT INT TERM
 
 # --- Sanity-check the MIG sysext contents ---
 # Buffer the listing before grep -q — piping unsquashfs into `grep -q`
@@ -536,12 +587,17 @@ if_real ln -sf "$LIVE_NVIDIA" /etc/extensions/nvidia.raw
 if_real ln -sf "${PERSIST_DIR}/nvidia-mig.raw" /etc/extensions/nvidia-mig.raw
 
 # Unmerge + re-merge so the refreshed nvidia-mig.raw is picked up. The driver
-# sysext is left untouched (no /usr write, no driver swap).
+# sysext is left untouched (no /usr write, no driver swap). INT/TERM are held
+# off across the pair: exiting between them would leave both sysexts unmerged
+# (driver userspace gone) until a reboot or a manual merge.
+trap '' INT TERM
 echo "Unmerging sysext..."
 if_real systemd-sysext unmerge
 echo "Re-merging sysext..."
 if_real systemd-sysext merge
 if_real systemctl daemon-reload
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ─────────────────────────────────────────────────────────────────────────
 # Register the MIG service PREINIT via midclt.
@@ -593,16 +649,40 @@ except Exception:
     fi
 }
 
-# Stage scripts/nvidia-mig-preinit.sh to $1. Prefer a sibling file (checkout /
-# extracted dir); otherwise fetch from the repo (release tag if one was given,
-# then main). Honors --dry-run. Returns non-zero if it can't obtain the file.
+# Stage nvidia-mig-preinit.sh to $1. A sibling file wins when this script
+# runs from a real checkout (developer edits must not be shadowed); piped
+# curl|bash runs have no sibling, so they stage the copy bundled inside the
+# already-verified raw, which matches the installed sysext exactly. The
+# network fetch remains for raws that predate the bundling: the pinned
+# release tag, with main as a loud last resort (pre-v29 tags only).
+# Honors --dry-run. Returns non-zero if it can't obtain the file.
 stage_mig_preinit() {
     local dest="$1" dir ref url
-    dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || dir=""
+    # Deliberately not $PWD: when piped, BASH_SOURCE is no file, and a stray
+    # nvidia-mig-preinit.sh in the caller's cwd must not override the raw.
+    dir=""
+    if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+        dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || dir=""
+    fi
     if [ -n "$dir" ] && [ -f "${dir}/nvidia-mig-preinit.sh" ]; then
-        if_real cp "${dir}/nvidia-mig-preinit.sh" "$dest"
+        if_real cp "${dir}/nvidia-mig-preinit.sh" "$dest" || return 1
         return 0
     fi
+    # Same buffered-listing idiom as the sanity check above (SIGPIPE).
+    if printf '%s\n' "$MIG_LISTING" | grep -qF 'usr/share/nvidia-mig/nvidia-mig-preinit.sh'; then
+        if $DRY_RUN; then
+            echo "[dry-run] would: extract bundled nvidia-mig-preinit.sh from the raw to ${dest}" >&2
+            return 0
+        fi
+        if unsquashfs -cat "$MIG_SRC" usr/share/nvidia-mig/nvidia-mig-preinit.sh \
+            > "${dest}.tmp" 2>/dev/null; then
+            mv "${dest}.tmp" "$dest" || return 1
+            return 0
+        fi
+        rm -f "${dest}.tmp"
+        echo "WARNING: failed to extract the bundled nvidia-mig-preinit.sh; trying the network" >&2
+    fi
+    resolve_release_tag || true
     if $DRY_RUN; then
         echo "[dry-run] would: fetch nvidia-mig-preinit.sh (release ${RELEASE_TAG:-<none>} -> main) to ${dest}" >&2
         return 0
@@ -610,10 +690,15 @@ stage_mig_preinit() {
     for ref in "$RELEASE_TAG" main; do
         [ -n "$ref" ] || continue
         url="https://raw.githubusercontent.com/${REPO}/${ref}/scripts/nvidia-mig-preinit.sh"
-        if curl -fsSL --retry 3 -o "$dest" "$url"; then
+        if curl -fsSL --retry 3 --max-time 60 -o "${dest}.tmp" "$url"; then
+            mv "${dest}.tmp" "$dest" || return 1
+            if [ "$ref" = "main" ]; then
+                echo "WARNING: staged nvidia-mig-preinit.sh from main (unpinned); expected only for pre-v29 releases" >&2
+            fi
             return 0
         fi
     done
+    rm -f "${dest}.tmp"
     return 1
 }
 
