@@ -506,14 +506,18 @@ if_real mkdir -p "$PERSIST_DIR"
 # sidecar, and the PREINIT script staged later all come from one release
 # instead of straddling a publish that lands mid-install.
 MIG_TMP=""
+MIG_NEW=""
 # Single cleanup trap for any tempfile we create; armed before the download
-# so an interrupt mid-transfer doesn't orphan a multi-MB file in /tmp.
+# so an interrupt mid-transfer doesn't orphan a multi-MB file in /tmp. It
+# also covers the raw staged in PERSIST_DIR before its rename (MIG_NEW); in
+# dry-run that only holds the mktemp template, so it is never removed there.
 # The `[ -z ] ||` shape matters: `[ -n ] &&` returns 1 when MIG_TMP is empty,
 # and under set -e a failing EXIT trap turns a successful --sysext install
 # into exit 1. Signals exit explicitly so the script cannot keep running
 # against a file the trap just deleted.
 cleanup_tmp() {
     [ -z "${MIG_TMP:-}" ] || rm -f "$MIG_TMP"
+    $DRY_RUN || [ -z "${MIG_NEW:-}" ] || rm -f "$MIG_NEW"
 }
 trap cleanup_tmp EXIT
 trap 'exit 130' INT
@@ -583,7 +587,17 @@ echo ""
 if [ "$MIG_SRC" -ef "${PERSIST_DIR}/nvidia-mig.raw" ]; then
     echo "MIG sysext is already the persistent copy at ${PERSIST_DIR}/nvidia-mig.raw; skipping copy."
 else
-    if_real cp "$MIG_SRC" "${PERSIST_DIR}/nvidia-mig.raw"
+    # On a reinstall the existing raw is the live, loop-mounted image, so it
+    # must not be rewritten in place: stage the new one in the same directory
+    # and rename it over the old one. The rename is atomic, and the mounted
+    # loop device keeps the old inode until the unmerge below. mktemp rather
+    # than a fixed name, so the cleanup trap can never be pointed at a
+    # --sysext source; dry-run prints the template instead of creating it.
+    MIG_NEW="${PERSIST_DIR}/nvidia-mig.raw.XXXXXX"
+    $DRY_RUN || MIG_NEW=$(mktemp "$MIG_NEW")
+    if_real cp "$MIG_SRC" "$MIG_NEW"
+    if_real mv -f "$MIG_NEW" "${PERSIST_DIR}/nvidia-mig.raw"
+    MIG_NEW=""
     $DRY_RUN || echo "Copied MIG sysext to ${PERSIST_DIR}/nvidia-mig.raw"
 fi
 
