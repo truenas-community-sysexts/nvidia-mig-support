@@ -24,7 +24,7 @@ To remove the MIG layer later: `sudo uninstall-nvidia-mig` (bundled in the sysex
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mig-support/main/get.sh | sudo bash -s -- --uninstall
 ```
 
-`get.sh` runs the installer from the newest release that a hardware test approved for your TrueNAS train (25.10, or 26 for every 26.x including betas); see [Releases](#releases).
+`get.sh` runs the installer from the newest release that a hardware test approved for your TrueNAS train (25.10; from 26 on the major version, so 27 for every 27.x release including RCs); see [Releases](#releases).
 
 ## Why this exists
 
@@ -129,7 +129,7 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-mi
 
 A release is tagged `v<N>` (an auto-incrementing counter) and carries `nvidia-mig.raw`, its `.sha256`, and the `install-mig-sysext.sh` and `uninstall-mig-sysext.sh` scripts. The sysext is driver- and kernel-agnostic, so one release serves every supported TrueNAS train.
 
-**Each release is approved per TrueNAS train.** A release starts as a pre-release with one hardware-test issue per supported train (TrueNAS 25.10, and the TrueNAS 26 beta), and closing a train's issue as completed approves it for that train's boxes only. The one-liner (`get.sh`) derives the train from the TrueNAS version (the major version from 26 on, so every 26.x including betas is train `26`; major.minor before that, e.g. `25.10`) and runs the installer of the newest release approved for that train. Full releases from before per-train approval count for every train. If no release is approved for your train yet, it stops and points at the open hardware tests instead of installing anything untested. Releases published before `get.sh` carry only the raw and its checksum; for those it runs the scripts at the release's tag, which is the source that release was built from.
+**Each release is approved per TrueNAS train.** A release starts as a pre-release with one hardware-test issue per supported train (TrueNAS 25.10, and the TrueNAS 27 RC), and closing a train's issue as completed approves it for that train's boxes only. The one-liner (`get.sh`) derives the train from the TrueNAS version (the major version from 26 on, so every 27.x including RCs is train `27`; major.minor before that, e.g. `25.10`) and runs the installer of the newest release approved for that train. Full releases from before per-train approval count for every train. If no release is approved for your train yet, it stops and points at the open hardware tests instead of installing anything untested. Releases published before `get.sh` carry only the raw and its checksum; for those it runs the scripts at the release's tag, which is the source that release was built from.
 
 To pin an exact release (this skips the approval check, which is how a tester installs a release under test):
 
